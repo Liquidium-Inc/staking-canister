@@ -1,0 +1,15 @@
+{
+  pointer: 1,
+  edicts: [
+        { id: '895728: 815', amount: '2494713765', output: 1
+        },
+        { id: '895728: 815', amount: '2494713765', output: 2
+        },
+        { id: '895728: 815', amount: '912078', output: 5
+        },
+        { id: '895728: 886', amount: '20', output: 3
+        },
+        { id: '895728: 886', amount: '8999889880', output: 4
+        }
+    ]
+}

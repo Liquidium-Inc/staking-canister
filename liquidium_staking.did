@@ -1,0 +1,73 @@
+type AppConfig = record { bitcoin : BitcoinConfig };
+type BitcoinConfig = record {
+  sliq_rune_id : text;
+  network : Network;
+  liq_rune_id : text;
+  withdrawal_lockup_period : nat64;
+};
+type FingerprintInfo = record { fingerprint : text };
+type Network = variant { mainnet; regtest; testnet };
+type PoolInfo = record {
+  xpub : text;
+  address : text;
+  fingerprint : text;
+  index : nat32;
+};
+type Result = variant { Ok : vec record { nat; text }; Err : text };
+type Result_1 = variant { Ok : float64; Err : text };
+type Result_2 = variant { Ok : record { opt nat; opt nat }; Err : text };
+type Result_3 = variant { Ok : nat32; Err : text };
+type Result_4 = variant { Ok : text; Err : text };
+type Result_5 = variant { Ok; Err : text };
+type TxRecord = record {
+  sliq_amount : nat;
+  liq_amount : nat;
+  txid : text;
+  timestamp : nat64;
+  tx_type : TxTypeEnum;
+};
+type TxTypeEnum = variant { Stake; Reward; Unstake };
+type UnstakeRecord = record {
+  utxo : text;
+  user_address : text;
+  timestamp : nat64;
+  rune_amount : nat;
+};
+type UnstakeUtxo = record {
+  utxo : text;
+  prev_utxos : vec text;
+  timestamp : nat64;
+};
+service : () -> {
+  add_unstake_utxos : (vec text) -> ();
+  clean_unstake_utxos : () -> ();
+  debug_confimed_tx_fetcher : (nat8, nat) -> (Result);
+  get_config : () -> (AppConfig) query;
+  get_exchange_rate : () -> (Result_1) query;
+  get_exchange_rate_components : () -> (Result_2) query;
+  get_fingerprint : (opt nat32) -> (FingerprintInfo) query;
+  get_omnity_block : () -> (Result_3);
+  get_pool : (opt nat32) -> (PoolInfo) query;
+  get_pool_address : (opt nat32) -> (text) query;
+  get_processing : () -> (vec text) query;
+  get_recent_unstake_records : () -> (vec UnstakeRecord) query;
+  get_recorded : () -> (vec TxRecord) query;
+  get_unstake_utxos : () -> (vec UnstakeUtxo) query;
+  get_user_latest_unstake_record : (text) -> (opt UnstakeRecord) query;
+  get_xpub : (opt nat32) -> (text) query;
+  initialize_pool_addresses_range : (nat32, nat32) -> (Result_4);
+  insert_record : (TxRecord) -> ();
+  latest_block : () -> (opt nat) query;
+  logs : () -> (vec text) query;
+  parse_psbt_runes : (text) -> (text);
+  remove_all_processing : () -> ();
+  remove_all_tx_records : () -> ();
+  remove_processing : (text) -> ();
+  remove_record : (text) -> ();
+  reset_exchange_rate : () -> ();
+  stake : (text) -> (text);
+  start_cron : () -> ();
+  unstake : (text) -> (text);
+  update_unstake_record_utxo : (text, text) -> (Result_5);
+  withdraw : (text) -> (text);
+}

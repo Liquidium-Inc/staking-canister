@@ -1,0 +1,45 @@
+type FingerprintInfo = record { fingerprint : text };
+type PoolInfo = record {
+  xpub : text;
+  address : text;
+  fingerprint : text;
+  index : nat32;
+};
+type Result = variant { Ok : float64; Err : text };
+type Result_1 = variant { Ok : record { opt nat; opt nat }; Err : text };
+type Result_2 = variant { Ok : text; Err : text };
+type TxRecord = record {
+  sliq_amount : nat;
+  liq_amount : nat;
+  txid : text;
+  tx_type : TxTypeEnum;
+};
+type TxTypeEnum = variant { Stake; Reward; Unstake };
+type UnstakeRecord = record {
+  utxo : text;
+  user_address : text;
+  timestamp : nat64;
+  rune_amount : nat;
+};
+service : () -> {
+  get_exchange_rate : () -> (Result) query;
+  get_exchange_rate_components : () -> (Result_1) query;
+  get_fingerprint : (opt nat32) -> (FingerprintInfo) query;
+  get_pool : (opt nat32) -> (PoolInfo) query;
+  get_pool_address : (opt nat32) -> (text) query;
+  get_processing : () -> (vec text) query;
+  get_recent_unstake_records : () -> (vec UnstakeRecord) query;
+  get_recorded : () -> (vec TxRecord) query;
+  get_tx : (text) -> (Result_2);
+  get_user_latest_unstake_record : (text) -> (opt UnstakeRecord) query;
+  get_xpub : (opt nat32) -> (text) query;
+  initialize_pool_addresses_range : (nat32, nat32) -> (Result_2);
+  insert_record : (TxRecord) -> ();
+  parse_psbt_runes : (text) -> (text);
+  remove_processing : (text) -> ();
+  reset_exchange_rate : () -> ();
+  stake : (text) -> (text);
+  start_cron : () -> ();
+  unstake : (text) -> (text);
+  withdraw : (text) -> (text);
+}

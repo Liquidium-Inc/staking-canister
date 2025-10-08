@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "canisters": {
+    "liquidium_staking": {
+      "type": "custom",
+      "package": "liquidium_staking",
+      "candid": "liquidium_staking.did",
+      "wasm": "target/wasm32-unknown-unknown/release/liquidium_staking.wasm",
+      "build": "echo \"Bulding...\";",
+      "metadata": [
+        {
+          "name": "candid:service"
+        }
+      ],
+      "http_outgoing": [
+        "https://api.blockcypher.com",
+        "https://liquidium-staking.vercel.app"
+      ]
+    },
+    "liquidium_staking_prod": {
+      "type": "custom",
+      "package": "liquidium_staking",
+      "candid": "liquidium_staking.did",
+      "wasm": "target/wasm32-unknown-unknown/release/liquidium_staking.wasm",
+      "build": "echo \"Bulding...\";",
+      "metadata": [
+        {
+          "name": "candid:service"
+        }
+      ],
+      "http_outgoing": [
+        "https://api.blockcypher.com",
+        "https://liquidium-staking.vercel.app"
+      ]
+    }
+  },
+  "defaults": {
+    "bitcoin": {
+      "enabled": true,
+      "network": "mainnet",
+      "log_level": "info"
+    },
+    "build": {
+      "packtool": "",
+      "args": ""
+    }
+  },
+  "networks": {
+    "ic": {
+      "providers": ["https://ic0.app"],
+      "type": "persistent"
+    },
+    "local": {
+      "bind": "127.0.0.1:8000",
+      "type": "ephemeral",
+      "bitcoin": {
+        "enabled": true,
+        "nodes": ["127.0.0.1:18444"],
+        "network": "testnet4"
+      }
+    }
+  }
+}

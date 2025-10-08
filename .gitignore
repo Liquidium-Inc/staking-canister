@@ -1,0 +1,7 @@
+/.dfx
+.DS_Store
+/target
+/src/libs/rust_runes/target
+/bin
+/test
+/src/libs/ordinals_runes/target
