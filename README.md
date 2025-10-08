@@ -68,6 +68,12 @@ This generates Bitcoin addresses for the staking pools (indices 0-1).
 
 ---
 
+## Audit
+
+The Liquidium Staking canister was independently audited by ScaleBit. You can review the full report here: [Liquidium Staking Audit (September 1, 2025)](https://stake.liquidium.org/audit.pdf).
+
+---
+
 ## Contributing
 
 Interested in contributing? Please review [CONTRIBUTING.md](./CONTRIBUTING.md) for setup instructions, coding standards, and pull request guidelines. All contributors must adhere to our [Code of Conduct](./CODE_OF_CONDUCT.md).
