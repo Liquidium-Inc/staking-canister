@@ -28,7 +28,7 @@ num-traits = "0.2.19"
 ic-stable-structures = "0.6.9"
 ic-canister-log = "0.2.0"
 
-miniscript = { version = "7.0", features = ["compiler"] }
+miniscript = { version = "9.2", features = ["compiler"] }
 bitcoin = { version = "0.30" }                                                  # <— bajar a 0.30
 secp256k1 = { version = "0.27", default-features = false, features = ["rand"] }
 getrandom = { version = "=0.2.15", features = ["custom"] }
