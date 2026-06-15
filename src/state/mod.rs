@@ -212,8 +212,12 @@ pub fn set_exchange_rate_components(circulating_supply: u128, balance: u128) {
 
 /// Initializes genesis exchange-rate components for a fresh pool.
 pub fn init_genesis_exchange_rate_components() {
-    if get_stored_circulating_supply().is_none() && get_stored_balance().is_none() {
-        set_exchange_rate_components(0, 0);
+    match (get_stored_circulating_supply(), get_stored_balance()) {
+        (None, None) => set_exchange_rate_components(0, 0),
+        (Some(_), Some(_)) => {}
+        (None, Some(_)) | (Some(_), None) => {
+            panic!("Inconsistent exchange rate state detected; manual intervention required");
+        }
     }
 }
 

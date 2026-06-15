@@ -220,6 +220,7 @@ fn pre_upgrade() {
 fn post_upgrade() {
     core::storage::post_upgrade();
     transaction_parser::init();
+    state::init_genesis_exchange_rate_components();
 }
 
 #[query(guard = "no_replicated_call")]
