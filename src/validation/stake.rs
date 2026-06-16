@@ -421,9 +421,8 @@ pub async fn validate_rune_exchange_ratio(
     let ratio_delta = ratio - 1.0;
 
     // We need to make sure that exchange rate delta is:
-    //     - grather than 0 : ensures that the exchange rate is in the favor of the protocol
+    //     - greater than or equal to 0 : ensures that the exchange rate is in the favor of the protocol
     //     - less then 0.01 : mitigates ratio manipulation attempts
-
     if ratio_delta >= 0.0 && ratio_delta < 0.01 {
         details.validation_result = format!(
             "Rune exchange ratio validation passed: transaction ratio ({}) is favorable to protocol (stored rate: {})",
