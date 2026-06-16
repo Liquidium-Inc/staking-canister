@@ -210,6 +210,17 @@ pub fn set_exchange_rate_components(circulating_supply: u128, balance: u128) {
     BALANCE.with_borrow_mut(|b| b.set(Some(balance)).ok());
 }
 
+/// Initializes genesis exchange-rate components for a fresh pool.
+pub fn init_genesis_exchange_rate_components() {
+    match (get_stored_circulating_supply(), get_stored_balance()) {
+        (None, None) => set_exchange_rate_components(0, 0),
+        (Some(_), Some(_)) => {}
+        (None, Some(_)) | (Some(_), None) => {
+            panic!("Inconsistent exchange rate state detected; manual intervention required");
+        }
+    }
+}
+
 /// Retrieves the stored circulating supply
 pub fn get_stored_circulating_supply() -> Option<u128> {
     CIRCULATING_SUPPLY.with(|c| *c.borrow().get())

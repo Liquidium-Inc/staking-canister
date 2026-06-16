@@ -51,6 +51,7 @@ async fn initialize_pool_data() {
 #[init]
 pub fn init() {
     state::init();
+    state::init_genesis_exchange_rate_components();
 
     // Initialize the pool state
     ic_cdk_timers::set_timer(Duration::from_secs(0), || {
@@ -219,6 +220,7 @@ fn pre_upgrade() {
 fn post_upgrade() {
     core::storage::post_upgrade();
     transaction_parser::init();
+    state::init_genesis_exchange_rate_components();
 }
 
 #[query(guard = "no_replicated_call")]

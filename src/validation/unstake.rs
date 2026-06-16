@@ -415,42 +415,37 @@ async fn validate_rune_exchange_ratio(
     };
     details.unstake_exchange_ratio = unstake_exchange_ratio;
 
-    let exchange_rate_result = match crate::state::get_stored_exchange_rate() {
-        Some(stored_rate) => Ok(stored_rate),
-        None => Err("No exchange rate available in storage".to_string()),
-    };
+    let exchange_rate = crate::state::get_stored_exchange_rate().ok_or_else(|| {
+        UnstakeValidationError::Other("No exchange rate available in storage".to_string())
+    })?;
 
-    match exchange_rate_result {
-        Ok(exchange_rate) => {
-            details.api_exchange_ratio = Some(exchange_rate);
-            if exchange_rate > 0.0 {
-                let ratio = unstake_exchange_ratio / exchange_rate;
-                let ratio_delta = 1.0 - ratio;
+    if exchange_rate <= 0.0 {
+        return Err(UnstakeValidationError::Other(format!(
+            "Invalid stored exchange rate: {}",
+            exchange_rate
+        )));
+    }
 
-                // We need to make sure that exchange rate delta is:
-                //     - grather than 0 : ensures that the exchange rate is in the favor of the protocol
-                //     - less then 0.01 : mitigates ratio manipulation attempts
-                if ratio_delta >= 0.0 && ratio_delta < 0.01 {
-                    details.validation_result = format!(
-                        "Rune exchange ratio validation passed: transaction ratio ({}) is favorable to protocol (stored rate: {})",
-                        unstake_exchange_ratio, exchange_rate
-                    );
-                    is_valid = true;
-                } else {
-                    details.validation_result = format!(
-                        "Warning: Unstake exchange ratio ({}) is higher than stored rate ({}), which is unfavorable to protocol",
-                        unstake_exchange_ratio, exchange_rate
-                    );
-                    is_valid = false;
-                }
-            } else {
-                details.validation_result =
-                    "Zero exchange rate returned, skipping ratio validation".to_string();
-            }
-        }
-        Err(e) => {
-            details.validation_result = format!("Exchange rate unavailable: {}", e);
-        }
+    details.api_exchange_ratio = Some(exchange_rate);
+
+    let ratio = unstake_exchange_ratio / exchange_rate;
+    let ratio_delta = 1.0 - ratio;
+
+    // We need to make sure that exchange rate delta is:
+    //     - grather than 0 : ensures that the exchange rate is in the favor of the protocol
+    //     - less then 0.01 : mitigates ratio manipulation attempts
+    if ratio_delta >= 0.0 && ratio_delta < 0.01 {
+        details.validation_result = format!(
+            "Rune exchange ratio validation passed: transaction ratio ({}) is favorable to protocol (stored rate: {})",
+            unstake_exchange_ratio, exchange_rate
+        );
+        is_valid = true;
+    } else {
+        details.validation_result = format!(
+            "Warning: Unstake exchange ratio ({}) is higher than stored rate ({}), which is unfavorable to protocol",
+            unstake_exchange_ratio, exchange_rate
+        );
+        is_valid = false;
     }
 
     validate_values(psbt, &mut details, &mut is_valid).await;
