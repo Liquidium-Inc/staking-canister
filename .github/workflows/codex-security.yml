@@ -1,0 +1,683 @@
+name: Codex Security
+
+on:
+  push:
+    branches: [main]
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, edited, closed]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        required: true
+      head_sha:
+        required: true
+      base_ref:
+        required: true
+      base_sha:
+        required: true
+
+jobs:
+  refresh:
+    name: Refresh open PR scans
+    if: github.event_name == 'push'
+    concurrency:
+      group: codex-security-refresh-${{ github.repository }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      checks: write
+      pull-requests: read
+    steps:
+      - name: Dispatch scans for eligible open PRs
+        env:
+          BASE_REF: ${{ github.ref_name }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          dispatch_failures=0
+          page=1
+          while true; do
+            pull_requests=""
+            for request_attempt in 1 2 3; do
+              if pull_requests="$(curl \
+                --silent \
+                --show-error \
+                --fail-with-body \
+                --header "Accept: application/vnd.github+json" \
+                --header "Authorization: Bearer $GITHUB_TOKEN" \
+                --header "X-GitHub-Api-Version: 2022-11-28" \
+                "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/pulls?state=open&base=$BASE_REF&per_page=100&page=$page")"; then
+                break
+              fi
+              pull_requests=""
+              test "$request_attempt" -lt 3 || exit 1
+              sleep 1
+            done
+            while IFS= read -r dispatch; do
+              dispatch_head_sha="$(jq -r '.inputs.head_sha' <<< "$dispatch")"
+              invalidation_payload="$(jq -n \
+                --arg head_sha "$dispatch_head_sha" \
+                '{name: "Codex Security / policy", head_sha: $head_sha, status: "completed", conclusion: "failure", output: {title: "Codex Security policy", summary: "The target branch changed and this pull request has not yet been rescanned."}}')"
+              if ! curl \
+                --silent \
+                --show-error \
+                --fail-with-body \
+                --max-time 30 \
+                --request POST \
+                --header "Accept: application/vnd.github+json" \
+                --header "Authorization: Bearer $GITHUB_TOKEN" \
+                --header "X-GitHub-Api-Version: 2022-11-28" \
+                --data-binary "$invalidation_payload" \
+                "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/check-runs"; then
+                dispatch_failures=$((dispatch_failures + 1))
+                continue
+              fi
+              if ! curl \
+                --silent \
+                --show-error \
+                --fail-with-body \
+                --max-time 30 \
+                --request POST \
+                --header "Accept: application/vnd.github+json" \
+                --header "Authorization: Bearer $GITHUB_TOKEN" \
+                --header "X-GitHub-Api-Version: 2022-11-28" \
+                --data-binary "$dispatch" \
+                "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/workflows/codex-security.yml/dispatches"; then
+                dispatch_failures=$((dispatch_failures + 1))
+              fi
+            done < <(jq -c \
+              --arg repository "$GITHUB_REPOSITORY" \
+              '.[] | select(.head.repo.full_name == $repository) | select(.user.login != "dependabot[bot]") | {
+                ref: .base.ref,
+                inputs: {
+                  pr_number: (.number | tostring),
+                  head_sha: .head.sha,
+                  base_ref: .base.ref,
+                  base_sha: .base.sha
+                }
+              }' <<< "$pull_requests")
+            if test "$(jq 'length' <<< "$pull_requests")" -lt 100; then
+              break
+            fi
+            page=$((page + 1))
+          done
+          test "$dispatch_failures" -eq 0
+
+  context:
+    name: Validate PR context
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request_target' &&
+        github.event.action != 'closed' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        github.event.pull_request.user.login != 'dependabot[bot]' &&
+        (github.event.action != 'edited' || github.event.changes.base != null))
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+      pull-requests: read
+    outputs:
+      base_ref: ${{ steps.context.outputs.base_ref }}
+      base_sha: ${{ steps.context.outputs.base_sha }}
+      current: ${{ steps.context.outputs.current }}
+      head_sha: ${{ steps.context.outputs.head_sha }}
+      policy_check_id: ${{ steps.context.outputs.policy_check_id }}
+      pr_number: ${{ steps.context.outputs.pr_number }}
+    steps:
+      - name: Validate current PR and mark policy pending
+        id: context
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref || inputs.base_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || inputs.base_sha }}
+          EVENT_ACTION: ${{ github.event.action || 'base_refresh' }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || inputs.head_sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          echo "current=false" >> "$GITHUB_OUTPUT"
+          if test "$EVENT_ACTION" = "closed"; then
+            exit 0
+          fi
+
+          pull_request=""
+          for request_attempt in 1 2 3; do
+            if pull_request="$(curl --silent --show-error --fail-with-body \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer $GITHUB_TOKEN" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"; then break; fi
+            pull_request=""
+            test "$request_attempt" -lt 3 || exit 1
+            sleep 1
+          done
+          current_head="$(jq -r '.head.sha' <<< "$pull_request")"
+          current_head_repository="$(jq -r '.head.repo.full_name' <<< "$pull_request")"
+          current_author="$(jq -r '.user.login' <<< "$pull_request")"
+          current_base="$(jq -r '.base.ref' <<< "$pull_request")"
+          current_base_sha="$(jq -r '.base.sha' <<< "$pull_request")"
+          current_state="$(jq -r '.state' <<< "$pull_request")"
+          if test "$current_state" != "open" || \
+            test "$current_head_repository" != "$GITHUB_REPOSITORY" || \
+            test "$current_author" = "dependabot[bot]" || \
+            test "$current_head" != "$HEAD_SHA" || \
+            test "$current_base" != "$BASE_REF" || \
+            test "$current_base_sha" != "$BASE_SHA"; then
+            exit 0
+          fi
+
+          pending_payload="$(jq -n \
+            --arg external_id "$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT" \
+            --arg head_sha "$HEAD_SHA" \
+            --arg target_url "$RUN_URL" \
+            '{name: "Codex Security / policy", head_sha: $head_sha, status: "in_progress", external_id: $external_id, details_url: $target_url}')"
+          if ! policy_check="$(curl \
+            --silent \
+            --show-error \
+            --fail-with-body \
+            --max-time 30 \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GITHUB_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --data-binary "$pending_payload" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/check-runs")"; then
+            existing_checks="$(curl \
+              --silent \
+              --show-error \
+              --fail-with-body \
+              --max-time 30 \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer $GITHUB_TOKEN" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/check-runs?check_name=Codex%20Security%20%2F%20policy&filter=all&per_page=100")"
+            policy_check="$(jq -c \
+              --arg external_id "$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT" \
+              '[.check_runs[] | select(.external_id == $external_id)] | max_by(.id) // empty' \
+              <<< "$existing_checks")"
+            if test -z "$policy_check"; then
+              if ! policy_check="$(curl \
+                --silent \
+                --show-error \
+                --fail-with-body \
+                --max-time 30 \
+                --request POST \
+                --header "Accept: application/vnd.github+json" \
+                --header "Authorization: Bearer $GITHUB_TOKEN" \
+                --header "X-GitHub-Api-Version: 2022-11-28" \
+                --data-binary "$pending_payload" \
+                "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/check-runs")"; then
+                existing_checks="$(curl \
+                  --silent \
+                  --show-error \
+                  --fail-with-body \
+                  --max-time 30 \
+                  --header "Accept: application/vnd.github+json" \
+                  --header "Authorization: Bearer $GITHUB_TOKEN" \
+                  --header "X-GitHub-Api-Version: 2022-11-28" \
+                  "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/check-runs?check_name=Codex%20Security%20%2F%20policy&filter=all&per_page=100")"
+                policy_check="$(jq -c \
+                  --arg external_id "$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT" \
+                  '[.check_runs[] | select(.external_id == $external_id)] | max_by(.id) // empty' \
+                  <<< "$existing_checks")"
+              fi
+            fi
+            test -n "$policy_check"
+          fi
+          policy_check_id="$(jq -r '.id // empty' <<< "$policy_check")"
+          [[ "$policy_check_id" =~ ^[0-9]+$ ]]
+          echo "base_ref=$current_base" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$current_base_sha" >> "$GITHUB_OUTPUT"
+          echo "current=true" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$current_head" >> "$GITHUB_OUTPUT"
+          echo "policy_check_id=$policy_check_id" >> "$GITHUB_OUTPUT"
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+
+  excluded:
+    name: Block unsupported fork PR
+    if: >-
+      github.event_name == 'pull_request_target' &&
+      github.event.action != 'closed' &&
+      github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      statuses: write
+    steps:
+      - name: Publish terminal policy status
+        env:
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          curl \
+            --silent \
+            --show-error \
+            --fail-with-body \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GITHUB_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --data-binary '{"state":"failure","context":"Codex Security / policy","description":"Fork PRs require a trusted same-repository branch for subscription-backed scanning."}' \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA"
+
+  dependabot:
+    name: Record Dependabot policy exclusion
+    if: >-
+      github.event_name == 'pull_request_target' &&
+      github.event.action != 'closed' &&
+      github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+    steps:
+      - name: Publish neutral policy check
+        env:
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          check_payload="$(jq -n \
+            --arg head_sha "$HEAD_SHA" \
+            --arg target_url "$RUN_URL" \
+            '{name: "Codex Security / policy", head_sha: $head_sha, status: "completed", conclusion: "neutral", details_url: $target_url, output: {title: "Codex Security policy", summary: "Dependabot pull requests are excluded from subscription-backed self-hosted scans, matching OpenAI’s published CI boundary."}}')"
+          curl \
+            --silent \
+            --show-error \
+            --fail-with-body \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GITHUB_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --data-binary "$check_payload" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/check-runs"
+
+  scan:
+    name: PR security scan
+    needs: context
+    if: needs.context.outputs.current == 'true'
+    concurrency:
+      group: codex-security-pr-${{ github.repository }}-${{ needs.context.outputs.pr_number }}-${{ needs.context.outputs.head_sha }}-${{ needs.context.outputs.base_sha }}
+      cancel-in-progress: true
+    runs-on: [self-hosted, Linux, ARM64, codex-security]
+    timeout-minutes: 125
+    permissions:
+      checks: write
+      contents: read
+      pull-requests: write
+    env:
+      CODEX_SECURITY_VERSION: "0.1.5"
+
+    steps:
+      - name: Revalidate current PR inside scan lock
+        id: scan-context
+        env:
+          BASE_REF: ${{ needs.context.outputs.base_ref }}
+          BASE_SHA: ${{ needs.context.outputs.base_sha }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.context.outputs.head_sha }}
+          PR_NUMBER: ${{ needs.context.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          echo "current=false" >> "$GITHUB_OUTPUT"
+          pull_request="$(curl \
+            --silent \
+            --show-error \
+            --fail-with-body \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GITHUB_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
+          test "$(jq -r '.state' <<< "$pull_request")" = "open" || exit 0
+          test "$(jq -r '.head.sha' <<< "$pull_request")" = "$HEAD_SHA" || exit 0
+          test "$(jq -r '.base.ref' <<< "$pull_request")" = "$BASE_REF" || exit 0
+          test "$(jq -r '.base.sha' <<< "$pull_request")" = "$BASE_SHA" || exit 0
+          echo "current=true" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node.js
+        if: steps.scan-context.outputs.current == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "26"
+
+      - name: Set up Python
+        if: steps.scan-context.outputs.current == 'true'
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.14"
+
+      - name: Install Codex Security
+        if: steps.scan-context.outputs.current == 'true'
+        run: |
+          set -euo pipefail
+          npm install \
+            --prefix "$RUNNER_TEMP/codex-security" \
+            --ignore-scripts \
+            --no-audit \
+            --no-fund \
+            "@openai/codex-security@$CODEX_SECURITY_VERSION"
+
+      - name: Verify Codex Security
+        if: steps.scan-context.outputs.current == 'true'
+        env:
+          CODEX_SECURITY_BIN: ${{ runner.temp }}/codex-security/node_modules/.bin/codex-security
+        run: |
+          set -euo pipefail
+          test -x "$CODEX_SECURITY_BIN"
+          "$CODEX_SECURITY_BIN" --version
+
+      - name: Check out trusted CI support
+        if: steps.scan-context.outputs.current == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.context.outputs.base_sha }}
+          path: trusted-ci
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Preserve the trusted reporter
+        if: steps.scan-context.outputs.current == 'true'
+        run: |
+          set -euo pipefail
+          test -f "$GITHUB_WORKSPACE/trusted-ci/.github/scripts/codex-security-report.mjs"
+          install -m 0500 \
+            "$GITHUB_WORKSPACE/trusted-ci/.github/scripts/codex-security-report.mjs" \
+            "$RUNNER_TEMP/codex-security-report.mjs"
+
+      - name: Check out the pull request
+        if: steps.scan-context.outputs.current == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: refs/pull/${{ needs.context.outputs.pr_number }}/merge
+          path: pull-request
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Scan the pull request
+        id: codex-security
+        if: steps.scan-context.outputs.current == 'true'
+        env:
+          BASE_SHA: ${{ needs.context.outputs.base_sha }}
+          CODEX_HOME: /var/lib/codex-security-runner/codex-home
+          CODEX_SECURITY_BIN: ${{ runner.temp }}/codex-security/node_modules/.bin/codex-security
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.context.outputs.head_sha }}
+          PR_NUMBER: ${{ needs.context.outputs.pr_number }}
+          SCAN_DIR: ${{ runner.temp }}/codex-security-results-${{ github.run_id }}-${{ github.run_attempt }}
+          SCAN_JSON: ${{ runner.temp }}/codex-security-${{ github.run_id }}-${{ github.run_attempt }}.json
+          SCAN_LOG: ${{ runner.temp }}/codex-security-${{ github.run_id }}-${{ github.run_attempt }}.log
+        working-directory: pull-request
+        run: |
+          set -euo pipefail
+          merge_sha="$(git rev-parse HEAD)"
+          test "$(git rev-parse HEAD^1)" = "$BASE_SHA"
+          test "$(git rev-parse HEAD^2)" = "$HEAD_SHA"
+          knowledge_base_args=()
+          for knowledge_base in README.md AGENTS.md; do
+            trusted_knowledge_base="$GITHUB_WORKSPACE/trusted-ci/$knowledge_base"
+            if test -f "$trusted_knowledge_base"; then
+              knowledge_base_args+=(--knowledge-base "$trusted_knowledge_base")
+            fi
+          done
+
+          # @openai/codex-security@0.1.5 cannot seal immutable diff targets
+          # because it omits their required snapshot digest. Represent the
+          # current base-to-merge tree delta as staged changes so the CLI binds
+          # the scan to a deterministic working-tree digest.
+          git reset --soft "$BASE_SHA"
+          log_pipe="$SCAN_LOG.pipe"
+          mkfifo "$log_pipe"
+          tee "$SCAN_LOG" <"$log_pipe" >&2 &
+          log_pid=$!
+          set +e
+          env -u GITHUB_TOKEN timeout --signal=TERM --kill-after=30s 110m \
+            "$CODEX_SECURITY_BIN" scan . \
+            --working-tree \
+            --base "$BASE_SHA" \
+            --auth chatgpt \
+            --output-dir "$SCAN_DIR" \
+            --json \
+            --fail-on-severity high \
+            "${knowledge_base_args[@]}" \
+            >"$SCAN_JSON" \
+            2>"$log_pipe" &
+          scan_pid=$!
+          scan_superseded=false
+          freshness_poll_seconds=0
+          while kill -0 "$scan_pid" 2>/dev/null; do
+            sleep 1
+            if ! kill -0 "$scan_pid" 2>/dev/null; then
+              break
+            fi
+            freshness_poll_seconds=$((freshness_poll_seconds + 1))
+            if test "$freshness_poll_seconds" -lt 30; then
+              continue
+            fi
+            freshness_poll_seconds=0
+            if live_pull_request="$(curl \
+              --silent \
+              --show-error \
+              --fail-with-body \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer $GITHUB_TOKEN" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"; then
+              if test "$(jq -r '.state' <<< "$live_pull_request")" != "open" || \
+                test "$(jq -r '.head.sha' <<< "$live_pull_request")" != "$HEAD_SHA" || \
+                test "$(jq -r '.base.sha' <<< "$live_pull_request")" != "$BASE_SHA"; then
+                scan_superseded=true
+                kill -TERM "$scan_pid" 2>/dev/null || true
+                break
+              fi
+            fi
+          done
+          wait "$scan_pid"
+          scan_exit_code=$?
+          if test "$scan_superseded" = true; then
+            scan_exit_code=2
+          fi
+          wait "$log_pid"
+          log_exit_code=$?
+          unlink "$log_pipe"
+          if test "$scan_exit_code" -eq 0 && test "$log_exit_code" -ne 0; then
+            scan_exit_code=2
+          fi
+          set -e
+
+          echo "exit_code=$scan_exit_code" >> "$GITHUB_OUTPUT"
+          echo "merge_sha=$merge_sha" >> "$GITHUB_OUTPUT"
+          echo "scan_dir=$SCAN_DIR" >> "$GITHUB_OUTPUT"
+          echo "scan_json=$SCAN_JSON" >> "$GITHUB_OUTPUT"
+          echo "scan_log=$SCAN_LOG" >> "$GITHUB_OUTPUT"
+
+      - name: Report findings on the pull request
+        id: report
+        if: always() && !cancelled() && steps.scan-context.outputs.current == 'true'
+        env:
+          BASE_REF: ${{ needs.context.outputs.base_ref }}
+          BASE_SHA: ${{ needs.context.outputs.base_sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.context.outputs.head_sha }}
+          MERGE_REPO: ${{ github.workspace }}/pull-request
+          MERGE_SHA: ${{ steps.codex-security.outputs.merge_sha }}
+          PR_NUMBER: ${{ needs.context.outputs.pr_number }}
+          SCAN_DIR: ${{ steps.codex-security.outputs.scan_dir || format('{0}/codex-security-results-{1}-{2}', runner.temp, github.run_id, github.run_attempt) }}
+          SCAN_EXIT_CODE: ${{ steps.codex-security.outputs.exit_code || '2' }}
+        run: node "$RUNNER_TEMP/codex-security-report.mjs"
+
+      - name: Preserve scan results
+        id: artifact
+        if: always() && !cancelled() && steps.scan-context.outputs.current == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: codex-security-results-${{ github.run_attempt }}
+          path: |
+            ${{ steps.codex-security.outputs.scan_dir }}
+            ${{ steps.codex-security.outputs.scan_json }}
+            ${{ steps.codex-security.outputs.scan_log }}
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Enforce security policy
+        if: always() && !cancelled() && steps.scan-context.outputs.current == 'true'
+        env:
+          ARTIFACT_OUTCOME: ${{ steps.artifact.outcome }}
+          POLICY_STATE: ${{ steps.report.outputs.policy_state }}
+          REPORT_OUTCOME: ${{ steps.report.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SCAN_EXIT_CODE: ${{ steps.codex-security.outputs.exit_code || '2' }}
+        run: |
+          set -euo pipefail
+          if test "$SCAN_EXIT_CODE" -ne 0; then
+            exit "$SCAN_EXIT_CODE"
+          fi
+          test "$REPORT_OUTCOME" = "success"
+          test "$ARTIFACT_OUTCOME" = "success"
+          test "$POLICY_STATE" = "success"
+
+      - name: Finalize policy status
+        if: always() && !cancelled()
+        env:
+          ARTIFACT_OUTCOME: ${{ steps.artifact.outcome }}
+          BASE_REF: ${{ needs.context.outputs.base_ref }}
+          BASE_SHA: ${{ needs.context.outputs.base_sha }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.context.outputs.head_sha }}
+          POLICY_DESCRIPTION: ${{ steps.report.outputs.policy_description }}
+          POLICY_STATE: ${{ steps.report.outputs.policy_state }}
+          POLICY_CHECK_ID: ${{ needs.context.outputs.policy_check_id }}
+          PR_NUMBER: ${{ needs.context.outputs.pr_number }}
+          REPORT_OUTCOME: ${{ steps.report.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          pull_request="$(curl \
+            --silent \
+            --show-error \
+            --fail-with-body \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GITHUB_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
+          current_head="$(jq -r '.head.sha' <<< "$pull_request")"
+          current_base="$(jq -r '.base.ref' <<< "$pull_request")"
+          current_base_sha="$(jq -r '.base.sha' <<< "$pull_request")"
+          current_state="$(jq -r '.state' <<< "$pull_request")"
+          if test "$current_state" != "open" || \
+            test "$current_head" != "$HEAD_SHA" || \
+            test "$current_base" != "$BASE_REF" || \
+            test "$current_base_sha" != "$BASE_SHA"; then
+            stale_payload="$(jq -n \
+              --arg target_url "$RUN_URL" \
+              '{status: "completed", conclusion: "cancelled", details_url: $target_url, output: {title: "Codex Security policy", summary: "This scan was superseded by a newer pull-request revision or the pull request was closed."}}')"
+            curl \
+              --silent \
+              --show-error \
+              --fail-with-body \
+              --retry 2 \
+              --retry-delay 1 \
+              --retry-all-errors \
+              --request PATCH \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer $GITHUB_TOKEN" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              --data-binary "$stale_payload" \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/check-runs/$POLICY_CHECK_ID"
+            exit 0
+          fi
+
+          policy_state="$POLICY_STATE"
+          policy_description="$POLICY_DESCRIPTION"
+          if test "$REPORT_OUTCOME" != "success" || \
+            test "$ARTIFACT_OUTCOME" != "success" || \
+            { test "$policy_state" != "success" && test "$policy_state" != "failure"; } || \
+            test -z "$policy_description"; then
+            policy_state="failure"
+            policy_description="Codex Security could not publish and preserve a complete report."
+          fi
+          check_payload="$(jq -n \
+            --arg conclusion "$policy_state" \
+            --arg description "$policy_description" \
+            --arg target_url "$RUN_URL" \
+            '{status: "completed", conclusion: $conclusion, details_url: $target_url, output: {title: "Codex Security policy", summary: $description}}')"
+
+          curl \
+            --silent \
+            --show-error \
+            --fail-with-body \
+            --retry 2 \
+            --retry-delay 1 \
+            --retry-all-errors \
+            --request PATCH \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GITHUB_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --data-binary "$check_payload" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/check-runs/$POLICY_CHECK_ID"
+
+  finalize-unfinished:
+    name: Finalize unfinished policy check
+    needs: [context, scan]
+    if: >-
+      always() &&
+      needs.context.outputs.current == 'true' &&
+      (needs.scan.result == 'cancelled' || needs.scan.result == 'failure')
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+    steps:
+      - name: Close this run's unfinished policy check
+        env:
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_TOKEN: ${{ github.token }}
+          POLICY_CHECK_ID: ${{ needs.context.outputs.policy_check_id }}
+          SCAN_RESULT: ${{ needs.scan.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          policy_check=""
+          for request_attempt in 1 2 3; do
+            if policy_check="$(curl --silent --show-error --fail-with-body \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer $GITHUB_TOKEN" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/check-runs/$POLICY_CHECK_ID")"; then break; fi
+            policy_check=""
+            test "$request_attempt" -lt 3 || exit 1
+            sleep 1
+          done
+          test "$(jq -r '.status' <<< "$policy_check")" != "completed" || exit 0
+          conclusion="failure"
+          summary="Codex Security scan failed before publishing a terminal policy result."
+          if test "$SCAN_RESULT" = "cancelled"; then
+            conclusion="cancelled"
+            summary="Codex Security scan was cancelled before completion."
+          fi
+          check_payload="$(jq -n \
+            --arg conclusion "$conclusion" \
+            --arg summary "$summary" \
+            --arg target_url "$RUN_URL" \
+            '{status: "completed", conclusion: $conclusion, details_url: $target_url, output: {title: "Codex Security policy", summary: $summary}}')"
+          curl \
+            --silent \
+            --show-error \
+            --fail-with-body \
+            --retry 2 \
+            --retry-delay 1 \
+            --retry-all-errors \
+            --request PATCH \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GITHUB_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --data-binary "$check_payload" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/check-runs/$POLICY_CHECK_ID"
