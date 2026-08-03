@@ -44,6 +44,7 @@ const scanExitCode =
     ? parsedScanExitCode
     : 2;
 const artifactOutcome = process.env.ARTIFACT_OUTCOME?.trim() ?? "failure";
+const scanOutcome = process.env.SCAN_OUTCOME?.trim() ?? "failure";
 const serverUrl = process.env.GITHUB_SERVER_URL ?? "https://github.com";
 const apiUrl = (process.env.GITHUB_API_URL ?? "https://api.github.com").replace(
   /\/$/,
@@ -490,7 +491,9 @@ const scanCompleteness = validFindingsDocument
   ? (coverage?.completeness ?? "unknown")
   : "unknown";
 const completeness =
-  artifactOutcome === "success" ? scanCompleteness : "incomplete";
+  artifactOutcome === "success" && scanOutcome === "success"
+    ? scanCompleteness
+    : "incomplete";
 const completeResult =
   completeness === "complete" && (scanExitCode === 0 || scanExitCode === 1);
 
@@ -710,10 +713,10 @@ const summaryLines = [
   `Scanned PR head \`${headSha.slice(0, 12)}\` with \`@openai/codex-security@${codexSecurityVersion}\`. [Open logs and the 7-day scan artifact](${runUrl}).`,
 ];
 
-if (artifactOutcome !== "success") {
+if (artifactOutcome !== "success" || scanOutcome !== "success") {
   summaryLines.push(
     "",
-    "> ⚠️ The scan artifact could not be preserved. Treat this result as incomplete.",
+    "> ⚠️ The scan step or artifact preservation did not complete successfully. Treat this result as incomplete.",
   );
 }
 

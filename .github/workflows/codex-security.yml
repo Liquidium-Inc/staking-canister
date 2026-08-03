@@ -103,18 +103,23 @@ jobs:
               "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/check-runs"; then
               invalidation_confirmed=true
             else
-              existing_checks="$(curl \
-                --silent \
-                --show-error \
-                --fail-with-body \
-                --max-time 30 \
-                --retry 2 \
-                --retry-delay 1 \
-                --retry-all-errors \
-                --header "Accept: application/vnd.github+json" \
-                --header "Authorization: Bearer $GITHUB_TOKEN" \
-                --header "X-GitHub-Api-Version: 2022-11-28" \
-                "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/commits/$dispatch_head_sha/check-runs?check_name=Codex%20Security%20%2F%20policy&filter=all&per_page=100")"
+              existing_checks=""
+              for request_attempt in 1 2 3; do
+                if existing_checks="$(curl \
+                  --silent \
+                  --show-error \
+                  --fail-with-body \
+                  --max-time 30 \
+                  --header "Accept: application/vnd.github+json" \
+                  --header "Authorization: Bearer $GITHUB_TOKEN" \
+                  --header "X-GitHub-Api-Version: 2022-11-28" \
+                  "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/commits/$dispatch_head_sha/check-runs?check_name=Codex%20Security%20%2F%20policy&filter=all&per_page=100")"; then
+                  break
+                fi
+                existing_checks=""
+                test "$request_attempt" -lt 3 || exit 1
+                sleep 1
+              done
               if jq -e \
                 --arg external_id "$invalidation_external_id" \
                 '.check_runs | any(.external_id == $external_id)' \
@@ -417,6 +422,24 @@ jobs:
           test "$(jq -r '.base.sha' <<< "$pull_request")" = "$BASE_SHA" || exit 0
           echo "current=true" >> "$GITHUB_OUTPUT"
 
+      - name: Check out trusted CI support
+        if: steps.scan-context.outputs.current == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.context.outputs.base_sha }}
+          path: trusted-ci
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Preserve the trusted reporter
+        if: steps.scan-context.outputs.current == 'true'
+        run: |
+          set -euo pipefail
+          test -f "$GITHUB_WORKSPACE/trusted-ci/.github/scripts/codex-security-report.mjs"
+          install -m 0500 \
+            "$GITHUB_WORKSPACE/trusted-ci/.github/scripts/codex-security-report.mjs" \
+            "$RUNNER_TEMP/codex-security-report.mjs"
+
       - name: Set up Node.js
         if: steps.scan-context.outputs.current == 'true'
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
@@ -448,24 +471,6 @@ jobs:
           set -euo pipefail
           test -x "$CODEX_SECURITY_BIN"
           "$CODEX_SECURITY_BIN" --version
-
-      - name: Check out trusted CI support
-        if: steps.scan-context.outputs.current == 'true'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: ${{ needs.context.outputs.base_sha }}
-          path: trusted-ci
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Preserve the trusted reporter
-        if: steps.scan-context.outputs.current == 'true'
-        run: |
-          set -euo pipefail
-          test -f "$GITHUB_WORKSPACE/trusted-ci/.github/scripts/codex-security-report.mjs"
-          install -m 0500 \
-            "$GITHUB_WORKSPACE/trusted-ci/.github/scripts/codex-security-report.mjs" \
-            "$RUNNER_TEMP/codex-security-report.mjs"
 
       - name: Check out the pull request
         if: steps.scan-context.outputs.current == 'true'
@@ -564,6 +569,7 @@ jobs:
           PR_NUMBER: ${{ needs.context.outputs.pr_number }}
           SCAN_DIR: ${{ steps.codex-security.outputs.scan_dir || format('{0}/codex-security-results-{1}-{2}', runner.temp, github.run_id, github.run_attempt) }}
           SCAN_EXIT_CODE: ${{ steps.codex-security.outputs.exit_code || '2' }}
+          SCAN_OUTCOME: ${{ steps.codex-security.outcome }}
         run: node "$RUNNER_TEMP/codex-security-report.mjs"
 
       - name: Enforce security policy
@@ -574,11 +580,13 @@ jobs:
           REPORT_OUTCOME: ${{ steps.report.outcome }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SCAN_EXIT_CODE: ${{ steps.codex-security.outputs.exit_code || '2' }}
+          SCAN_OUTCOME: ${{ steps.codex-security.outcome }}
         run: |
           set -euo pipefail
           if test "$SCAN_EXIT_CODE" -ne 0; then
             exit "$SCAN_EXIT_CODE"
           fi
+          test "$SCAN_OUTCOME" = "success"
           test "$REPORT_OUTCOME" = "success"
           test "$ARTIFACT_OUTCOME" = "success"
           test "$POLICY_STATE" = "success"
