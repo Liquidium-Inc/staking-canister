@@ -58,12 +58,12 @@ if (!Number.isInteger(pullNumber) || pullNumber < 1) {
 
 async function github(path, options = {}) {
   const method = options.method ?? "GET";
-  if (method !== "GET" && options.revalidate !== false) {
-    await assertCurrentPullRequest();
-  }
   const maxAttempts =
     method === "POST" && options.retry !== true ? 1 : GITHUB_MAX_ATTEMPTS;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    if (method !== "GET" && options.revalidate !== false) {
+      await assertCurrentPullRequest();
+    }
     const controller = new AbortController();
     const timeout = setTimeout(
       () => controller.abort(),
@@ -149,7 +149,7 @@ async function readJson(path) {
   try {
     return JSON.parse(await readFile(path, "utf8"));
   } catch (error) {
-    if (error?.code === "ENOENT") {
+    if (error?.code === "ENOENT" || error instanceof SyntaxError) {
       return null;
     }
     throw error;
