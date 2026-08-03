@@ -233,12 +233,12 @@ jobs:
             test -n "$policy_check"
           fi
           policy_check_id="$(jq -r '.id // empty' <<< "$policy_check")"
+          echo "policy_check_id=$policy_check_id" >> "$GITHUB_OUTPUT"
           [[ "$policy_check_id" =~ ^[0-9]+$ ]]
           echo "base_ref=$current_base" >> "$GITHUB_OUTPUT"
           echo "base_sha=$current_base_sha" >> "$GITHUB_OUTPUT"
           echo "current=true" >> "$GITHUB_OUTPUT"
           echo "head_sha=$current_head" >> "$GITHUB_OUTPUT"
-          echo "policy_check_id=$policy_check_id" >> "$GITHUB_OUTPUT"
           echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
 
   excluded:
@@ -246,28 +246,35 @@ jobs:
     if: >-
       github.event_name == 'pull_request_target' &&
       github.event.action != 'closed' &&
-      github.event.pull_request.head.repo.full_name != github.repository
+      github.event.pull_request.head.repo.full_name != github.repository &&
+      github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-latest
     permissions:
-      statuses: write
+      checks: write
     steps:
       - name: Publish terminal policy status
         env:
           GITHUB_API_URL: ${{ github.api_url }}
           GITHUB_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
+          check_payload="$(jq -n \
+            --arg head_sha "$HEAD_SHA" \
+            --arg target_url "$RUN_URL" \
+            '{name: "Codex Security / policy", head_sha: $head_sha, status: "completed", conclusion: "failure", details_url: $target_url, output: {title: "Codex Security policy", summary: "Fork pull requests require a trusted same-repository branch for subscription-backed scanning."}}')"
           curl \
             --silent \
             --show-error \
             --fail-with-body \
+            --max-time 30 \
             --request POST \
             --header "Accept: application/vnd.github+json" \
             --header "Authorization: Bearer $GITHUB_TOKEN" \
             --header "X-GitHub-Api-Version: 2022-11-28" \
-            --data-binary '{"state":"failure","context":"Codex Security / policy","description":"Fork PRs require a trusted same-repository branch for subscription-backed scanning."}' \
-            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA"
+            --data-binary "$check_payload" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/check-runs"
 
   dependabot:
     name: Record Dependabot policy exclusion
@@ -295,6 +302,7 @@ jobs:
             --silent \
             --show-error \
             --fail-with-body \
+            --max-time 30 \
             --request POST \
             --header "Accept: application/vnd.github+json" \
             --header "Authorization: Bearer $GITHUB_TOKEN" \
@@ -307,7 +315,7 @@ jobs:
     needs: context
     if: needs.context.outputs.current == 'true'
     concurrency:
-      group: codex-security-pr-${{ github.repository }}-${{ needs.context.outputs.pr_number }}-${{ needs.context.outputs.head_sha }}-${{ needs.context.outputs.base_sha }}
+      group: codex-security-pr-${{ github.repository }}-${{ needs.context.outputs.pr_number }}
       cancel-in-progress: true
     runs-on: [self-hosted, Linux, ARM64, codex-security]
     timeout-minutes: 125
@@ -336,6 +344,9 @@ jobs:
             --show-error \
             --fail-with-body \
             --max-time 30 \
+            --retry 2 \
+            --retry-delay 1 \
+            --retry-all-errors \
             --header "Accept: application/vnd.github+json" \
             --header "Authorization: Bearer $GITHUB_TOKEN" \
             --header "X-GitHub-Api-Version: 2022-11-28" \
@@ -412,10 +423,7 @@ jobs:
           BASE_SHA: ${{ needs.context.outputs.base_sha }}
           CODEX_HOME: /var/lib/codex-security-runner/codex-home
           CODEX_SECURITY_BIN: ${{ runner.temp }}/codex-security/node_modules/.bin/codex-security
-          GITHUB_API_URL: ${{ github.api_url }}
-          GITHUB_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ needs.context.outputs.head_sha }}
-          PR_NUMBER: ${{ needs.context.outputs.pr_number }}
           SCAN_DIR: ${{ runner.temp }}/codex-security-results-${{ github.run_id }}-${{ github.run_attempt }}
           SCAN_JSON: ${{ runner.temp }}/codex-security-${{ github.run_id }}-${{ github.run_attempt }}.json
           SCAN_LOG: ${{ runner.temp }}/codex-security-${{ github.run_id }}-${{ github.run_attempt }}.log
@@ -443,7 +451,7 @@ jobs:
           tee "$SCAN_LOG" <"$log_pipe" >&2 &
           log_pid=$!
           set +e
-          env -u GITHUB_TOKEN timeout --signal=TERM --kill-after=30s 110m \
+          timeout --signal=TERM --kill-after=30s 110m \
             "$CODEX_SECURITY_BIN" scan . \
             --working-tree \
             --base "$BASE_SHA" \
@@ -453,43 +461,8 @@ jobs:
             --fail-on-severity high \
             "${knowledge_base_args[@]}" \
             >"$SCAN_JSON" \
-            2>"$log_pipe" &
-          scan_pid=$!
-          scan_superseded=false
-          freshness_poll_seconds=0
-          while kill -0 "$scan_pid" 2>/dev/null; do
-            sleep 1
-            if ! kill -0 "$scan_pid" 2>/dev/null; then
-              break
-            fi
-            freshness_poll_seconds=$((freshness_poll_seconds + 1))
-            if test "$freshness_poll_seconds" -lt 30; then
-              continue
-            fi
-            freshness_poll_seconds=0
-            if live_pull_request="$(curl \
-              --silent \
-              --show-error \
-              --fail-with-body \
-              --max-time 30 \
-              --header "Accept: application/vnd.github+json" \
-              --header "Authorization: Bearer $GITHUB_TOKEN" \
-              --header "X-GitHub-Api-Version: 2022-11-28" \
-              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"; then
-              if test "$(jq -r '.state' <<< "$live_pull_request")" != "open" || \
-                test "$(jq -r '.head.sha' <<< "$live_pull_request")" != "$HEAD_SHA" || \
-                test "$(jq -r '.base.sha' <<< "$live_pull_request")" != "$BASE_SHA"; then
-                scan_superseded=true
-                kill -TERM "$scan_pid" 2>/dev/null || true
-                break
-              fi
-            fi
-          done
-          wait "$scan_pid"
+            2>"$log_pipe"
           scan_exit_code=$?
-          if test "$scan_superseded" = true; then
-            scan_exit_code=2
-          fi
           wait "$log_pid"
           log_exit_code=$?
           unlink "$log_pipe"
@@ -638,14 +611,19 @@ jobs:
     needs: [context, scan]
     if: >-
       always() &&
-      needs.context.outputs.current == 'true' &&
-      (needs.scan.result == 'cancelled' || needs.scan.result == 'failure')
+      needs.context.outputs.policy_check_id != '' &&
+      (needs.context.result == 'cancelled' ||
+        needs.context.result == 'failure' ||
+        needs.scan.result == 'cancelled' ||
+        needs.scan.result == 'failure' ||
+        needs.scan.result == 'skipped')
     runs-on: ubuntu-latest
     permissions:
       checks: write
     steps:
       - name: Close this run's unfinished policy check
         env:
+          CONTEXT_RESULT: ${{ needs.context.result }}
           GITHUB_API_URL: ${{ github.api_url }}
           GITHUB_TOKEN: ${{ github.token }}
           POLICY_CHECK_ID: ${{ needs.context.outputs.policy_check_id }}
@@ -667,7 +645,9 @@ jobs:
           test "$(jq -r '.status' <<< "$policy_check")" != "completed" || exit 0
           conclusion="failure"
           summary="Codex Security scan failed before publishing a terminal policy result."
-          if test "$SCAN_RESULT" = "cancelled"; then
+          if test "$CONTEXT_RESULT" != "success"; then
+            summary="Codex Security could not validate the pull-request context."
+          elif test "$SCAN_RESULT" = "cancelled"; then
             conclusion="cancelled"
             summary="Codex Security scan was cancelled before completion."
           fi

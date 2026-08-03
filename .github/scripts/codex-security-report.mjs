@@ -181,7 +181,7 @@ function addedLinesFromPatch(patch) {
     if (line.startsWith("-")) {
       continue;
     }
-    if (line.startsWith(" ")) {
+    if (line.startsWith(" ") || line === "") {
       newLine += 1;
     }
   }
@@ -322,7 +322,13 @@ function truncate(value, maxLength) {
 }
 
 function sourceLink(location) {
-  if (!location) {
+  if (
+    !mergeSha ||
+    typeof location?.path !== "string" ||
+    !location.path ||
+    !Number.isInteger(location.startLine) ||
+    location.startLine < 1
+  ) {
     return "—";
   }
   const encodedPath = location.path
@@ -363,12 +369,18 @@ function inlineBody(finding) {
 }
 
 function stripFindingStatePrefix(body) {
-  for (const prefix of [STALE_PREFIX, RELOCATED_PREFIX, SUMMARY_ONLY_PREFIX]) {
-    if (body.startsWith(prefix)) {
-      return body.slice(prefix.length);
+  let stripped = body;
+  while (true) {
+    const prefix = [
+      STALE_PREFIX,
+      RELOCATED_PREFIX,
+      SUMMARY_ONLY_PREFIX,
+    ].find((candidate) => stripped.startsWith(candidate));
+    if (!prefix) {
+      return stripped;
     }
+    stripped = stripped.slice(prefix.length);
   }
-  return body;
 }
 
 function stripFindingMarker(body) {
@@ -426,12 +438,17 @@ function severityCounts(findings) {
 
 function sortFindingsBySeverity(findings) {
   const rank = { critical: 0, high: 1, medium: 2, low: 3, informational: 4 };
+  const rankOf = (finding) => {
+    const severity = finding.severity?.level;
+    return typeof severity === "string" && Object.hasOwn(rank, severity)
+      ? rank[severity]
+      : 5;
+  };
   return findings
     .map((finding, index) => ({ finding, index }))
     .sort(
       (left, right) =>
-        (rank[left.finding.severity?.level] ?? 5) -
-          (rank[right.finding.severity?.level] ?? 5) ||
+        rankOf(left.finding) - rankOf(right.finding) ||
         left.index - right.index,
     )
     .map(({ finding }) => finding);
