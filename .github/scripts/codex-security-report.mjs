@@ -35,9 +35,14 @@ const baseSha = requiredEnv("BASE_SHA");
 const headSha = requiredEnv("HEAD_SHA");
 const githubOutput = requiredEnv("GITHUB_OUTPUT");
 const mergeRepo = requiredEnv("MERGE_REPO");
-const mergeSha = requiredEnv("MERGE_SHA");
+const mergeSha = process.env.MERGE_SHA?.trim() ?? "";
 const scanDir = requiredEnv("SCAN_DIR");
-const scanExitCode = Number(process.env.SCAN_EXIT_CODE ?? "2");
+const rawScanExitCode = process.env.SCAN_EXIT_CODE?.trim();
+const parsedScanExitCode = Number(rawScanExitCode);
+const scanExitCode =
+  rawScanExitCode && Number.isInteger(parsedScanExitCode)
+    ? parsedScanExitCode
+    : 2;
 const serverUrl = process.env.GITHUB_SERVER_URL ?? "https://github.com";
 const apiUrl = (process.env.GITHUB_API_URL ?? "https://api.github.com").replace(
   /\/$/,
@@ -211,6 +216,9 @@ async function mergeDiffForPath(path) {
 }
 
 async function headLineForMergeLine(path, mergeLine) {
+  if (!mergeSha) {
+    return null;
+  }
   if (headSha === mergeSha) {
     return mergeLine;
   }
@@ -409,7 +417,7 @@ function severityCounts(findings) {
   };
   for (const finding of findings) {
     const severity = finding.severity?.level;
-    if (severity in counts) {
+    if (typeof severity === "string" && Object.hasOwn(counts, severity)) {
       counts[severity] += 1;
     }
   }
@@ -503,7 +511,7 @@ for (const comment of existingReviewComments) {
   }
 }
 
-const activeFingerprints = new Set(sortedFindings.map(findingFingerprint));
+const activeFingerprints = new Set(sortedFindings.map(findingMarkerId));
 const deliveredInline = new Set();
 const newInlineComments = [];
 const newInlineFingerprints = new Set();
@@ -710,7 +718,7 @@ if (findings.length === 0) {
     if (shownFindings >= MAX_SUMMARY_FINDINGS) {
       break;
     }
-    const fingerprint = findingFingerprint(finding);
+    const fingerprint = findingMarkerId(finding);
     const location = finding.locations?.[0];
     const row = `| ${escapeMarkdown(finding.severity?.level ?? "unknown")} | **${escapeMarkdown(truncate(finding.title, 240))}** — ${escapeMarkdown(truncate(finding.summary, 360))} | ${sourceLink(location)} | ${deliveredInline.has(fingerprint) ? "inline comment" : "summary only"} |`;
     if (

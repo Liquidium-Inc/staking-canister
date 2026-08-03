@@ -46,6 +46,7 @@ jobs:
                 --silent \
                 --show-error \
                 --fail-with-body \
+                --max-time 30 \
                 --header "Accept: application/vnd.github+json" \
                 --header "Authorization: Bearer $GITHUB_TOKEN" \
                 --header "X-GitHub-Api-Version: 2022-11-28" \
@@ -66,6 +67,9 @@ jobs:
                 --show-error \
                 --fail-with-body \
                 --max-time 30 \
+                --retry 2 \
+                --retry-delay 1 \
+                --retry-all-errors \
                 --request POST \
                 --header "Accept: application/vnd.github+json" \
                 --header "Authorization: Bearer $GITHUB_TOKEN" \
@@ -73,7 +77,6 @@ jobs:
                 --data-binary "$invalidation_payload" \
                 "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/check-runs"; then
                 dispatch_failures=$((dispatch_failures + 1))
-                continue
               fi
               if ! curl \
                 --silent \
@@ -147,7 +150,7 @@ jobs:
 
           pull_request=""
           for request_attempt in 1 2 3; do
-            if pull_request="$(curl --silent --show-error --fail-with-body \
+            if pull_request="$(curl --silent --show-error --fail-with-body --max-time 30 \
               --header "Accept: application/vnd.github+json" \
               --header "Authorization: Bearer $GITHUB_TOKEN" \
               --header "X-GitHub-Api-Version: 2022-11-28" \
@@ -332,6 +335,7 @@ jobs:
             --silent \
             --show-error \
             --fail-with-body \
+            --max-time 30 \
             --header "Accept: application/vnd.github+json" \
             --header "Authorization: Bearer $GITHUB_TOKEN" \
             --header "X-GitHub-Api-Version: 2022-11-28" \
@@ -467,6 +471,7 @@ jobs:
               --silent \
               --show-error \
               --fail-with-body \
+              --max-time 30 \
               --header "Accept: application/vnd.github+json" \
               --header "Authorization: Bearer $GITHUB_TOKEN" \
               --header "X-GitHub-Api-Version: 2022-11-28" \
@@ -559,12 +564,14 @@ jobs:
           PR_NUMBER: ${{ needs.context.outputs.pr_number }}
           REPORT_OUTCOME: ${{ steps.report.outcome }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SCAN_CURRENT: ${{ steps.scan-context.outputs.current }}
         run: |
           set -euo pipefail
           pull_request="$(curl \
             --silent \
             --show-error \
             --fail-with-body \
+            --max-time 30 \
             --header "Accept: application/vnd.github+json" \
             --header "Authorization: Bearer $GITHUB_TOKEN" \
             --header "X-GitHub-Api-Version: 2022-11-28" \
@@ -573,7 +580,8 @@ jobs:
           current_base="$(jq -r '.base.ref' <<< "$pull_request")"
           current_base_sha="$(jq -r '.base.sha' <<< "$pull_request")"
           current_state="$(jq -r '.state' <<< "$pull_request")"
-          if test "$current_state" != "open" || \
+          if test "$SCAN_CURRENT" != "true" || \
+            test "$current_state" != "open" || \
             test "$current_head" != "$HEAD_SHA" || \
             test "$current_base" != "$BASE_REF" || \
             test "$current_base_sha" != "$BASE_SHA"; then
@@ -647,7 +655,7 @@ jobs:
           set -euo pipefail
           policy_check=""
           for request_attempt in 1 2 3; do
-            if policy_check="$(curl --silent --show-error --fail-with-body \
+            if policy_check="$(curl --silent --show-error --fail-with-body --max-time 30 \
               --header "Accept: application/vnd.github+json" \
               --header "Authorization: Bearer $GITHUB_TOKEN" \
               --header "X-GitHub-Api-Version: 2022-11-28" \
