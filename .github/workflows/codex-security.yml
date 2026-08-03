@@ -140,9 +140,6 @@ jobs:
               --show-error \
               --fail-with-body \
               --max-time 30 \
-              --retry 2 \
-              --retry-delay 1 \
-              --retry-all-errors \
               --request POST \
               --header "Accept: application/vnd.github+json" \
               --header "Authorization: Bearer $GITHUB_TOKEN" \
@@ -374,14 +371,18 @@ jobs:
         run: |
           set -euo pipefail
           check_payload="$(jq -n \
+            --arg external_id "fork:$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT" \
             --arg head_sha "$HEAD_SHA" \
             --arg target_url "$RUN_URL" \
-            '{name: "Codex Security / policy", head_sha: $head_sha, status: "completed", conclusion: "failure", details_url: $target_url, output: {title: "Codex Security policy", summary: "Fork pull requests require a trusted same-repository branch for subscription-backed scanning."}}')"
+            '{name: "Codex Security / policy", head_sha: $head_sha, status: "completed", conclusion: "failure", external_id: $external_id, details_url: $target_url, output: {title: "Codex Security policy", summary: "Fork pull requests require a trusted same-repository branch for subscription-backed scanning."}}')"
           curl \
             --silent \
             --show-error \
             --fail-with-body \
             --max-time 30 \
+            --retry 2 \
+            --retry-delay 1 \
+            --retry-all-errors \
             --request POST \
             --header "Accept: application/vnd.github+json" \
             --header "Authorization: Bearer $GITHUB_TOKEN" \
@@ -663,27 +664,40 @@ jobs:
           PR_NUMBER: ${{ needs.context.outputs.pr_number }}
           REPORT_OUTCOME: ${{ steps.report.outcome }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SCAN_CONTEXT_OUTCOME: ${{ steps.scan-context.outcome }}
           SCAN_CURRENT: ${{ steps.scan-context.outputs.current }}
         run: |
           set -euo pipefail
-          pull_request="$(curl \
-            --silent \
-            --show-error \
-            --fail-with-body \
-            --max-time 30 \
-            --header "Accept: application/vnd.github+json" \
-            --header "Authorization: Bearer $GITHUB_TOKEN" \
-            --header "X-GitHub-Api-Version: 2022-11-28" \
-            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
+          pull_request=""
+          for request_attempt in 1 2 3; do
+            if pull_request="$(curl \
+              --silent \
+              --show-error \
+              --fail-with-body \
+              --max-time 30 \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer $GITHUB_TOKEN" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"; then
+              break
+            fi
+            pull_request=""
+            test "$request_attempt" -lt 3 || exit 1
+            sleep 1
+          done
           current_head="$(jq -r '.head.sha' <<< "$pull_request")"
           current_base="$(jq -r '.base.ref' <<< "$pull_request")"
           current_base_sha="$(jq -r '.base.sha' <<< "$pull_request")"
           current_state="$(jq -r '.state' <<< "$pull_request")"
-          if test "$SCAN_CURRENT" != "true" || \
-            test "$current_state" != "open" || \
+          revision_mismatch=false
+          if test "$current_state" != "open" || \
             test "$current_head" != "$HEAD_SHA" || \
             test "$current_base" != "$BASE_REF" || \
             test "$current_base_sha" != "$BASE_SHA"; then
+            revision_mismatch=true
+          fi
+          if test "$revision_mismatch" = true || \
+            { test "$SCAN_CONTEXT_OUTCOME" = "success" && test "$SCAN_CURRENT" != "true"; }; then
             stale_payload="$(jq -n \
               --arg target_url "$RUN_URL" \
               '{status: "completed", conclusion: "cancelled", details_url: $target_url, output: {title: "Codex Security policy", summary: "This scan was superseded by a newer pull-request revision or the pull request was closed."}}')"
