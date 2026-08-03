@@ -39,7 +39,9 @@ jobs:
           set -euo pipefail
           dispatch_failures=0
           dispatches_file="$RUNNER_TEMP/codex-security-dispatches.jsonl"
+          ready_dispatches_file="$RUNNER_TEMP/codex-security-ready-dispatches.jsonl"
           : > "$dispatches_file"
+          : > "$ready_dispatches_file"
           page=1
           while true; do
             pull_requests=""
@@ -78,10 +80,14 @@ jobs:
 
           while IFS= read -r dispatch; do
             dispatch_head_sha="$(jq -r '.inputs.head_sha' <<< "$dispatch")"
+            dispatch_pr_number="$(jq -r '.inputs.pr_number' <<< "$dispatch")"
+            invalidation_external_id="refresh:$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT:$dispatch_pr_number"
             invalidation_payload="$(jq -n \
+              --arg external_id "$invalidation_external_id" \
               --arg head_sha "$dispatch_head_sha" \
-              '{name: "Codex Security / policy", head_sha: $head_sha, status: "completed", conclusion: "failure", output: {title: "Codex Security policy", summary: "The target branch changed and this pull request has not yet been rescanned."}}')"
-            if ! curl \
+              '{name: "Codex Security / policy", head_sha: $head_sha, status: "completed", conclusion: "failure", external_id: $external_id, output: {title: "Codex Security policy", summary: "The target branch changed and this pull request has not yet been rescanned."}}')"
+            invalidation_confirmed=false
+            if curl \
               --silent \
               --show-error \
               --fail-with-body \
@@ -95,6 +101,30 @@ jobs:
               --header "X-GitHub-Api-Version: 2022-11-28" \
               --data-binary "$invalidation_payload" \
               "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/check-runs"; then
+              invalidation_confirmed=true
+            else
+              existing_checks="$(curl \
+                --silent \
+                --show-error \
+                --fail-with-body \
+                --max-time 30 \
+                --retry 2 \
+                --retry-delay 1 \
+                --retry-all-errors \
+                --header "Accept: application/vnd.github+json" \
+                --header "Authorization: Bearer $GITHUB_TOKEN" \
+                --header "X-GitHub-Api-Version: 2022-11-28" \
+                "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/commits/$dispatch_head_sha/check-runs?check_name=Codex%20Security%20%2F%20policy&filter=all&per_page=100")"
+              if jq -e \
+                --arg external_id "$invalidation_external_id" \
+                '.check_runs | any(.external_id == $external_id)' \
+                <<< "$existing_checks" >/dev/null; then
+                invalidation_confirmed=true
+              fi
+            fi
+            if test "$invalidation_confirmed" = true; then
+              echo "$dispatch" >> "$ready_dispatches_file"
+            else
               dispatch_failures=$((dispatch_failures + 1))
             fi
           done < "$dispatches_file"
@@ -105,6 +135,9 @@ jobs:
               --show-error \
               --fail-with-body \
               --max-time 30 \
+              --retry 2 \
+              --retry-delay 1 \
+              --retry-all-errors \
               --request POST \
               --header "Accept: application/vnd.github+json" \
               --header "Authorization: Bearer $GITHUB_TOKEN" \
@@ -113,7 +146,7 @@ jobs:
               "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/workflows/codex-security.yml/dispatches"; then
               dispatch_failures=$((dispatch_failures + 1))
             fi
-          done < "$dispatches_file"
+          done < "$ready_dispatches_file"
           test "$dispatch_failures" -eq 0
 
   cancel-closed:
@@ -123,7 +156,7 @@ jobs:
       github.event.action == 'closed' &&
       github.event.pull_request.head.repo.full_name == github.repository
     concurrency:
-      group: codex-security-pr-${{ github.repository }}-${{ github.event.pull_request.number }}
+      group: codex-security-pr-${{ github.repository }}-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}-${{ github.event.pull_request.base.sha }}
       cancel-in-progress: true
     runs-on: ubuntu-latest
     permissions: {}
@@ -139,9 +172,6 @@ jobs:
         github.event.pull_request.head.repo.full_name == github.repository &&
         github.event.pull_request.user.login != 'dependabot[bot]' &&
         (github.event.action != 'edited' || github.event.changes.base != null))
-    concurrency:
-      group: codex-security-pr-${{ github.repository }}-${{ github.event.pull_request.number || inputs.pr_number }}
-      cancel-in-progress: true
     runs-on: ubuntu-latest
     permissions:
       checks: write
@@ -345,7 +375,7 @@ jobs:
     needs: context
     if: needs.context.outputs.current == 'true'
     concurrency:
-      group: codex-security-pr-${{ github.repository }}-${{ needs.context.outputs.pr_number }}
+      group: codex-security-pr-${{ github.repository }}-${{ needs.context.outputs.pr_number }}-${{ needs.context.outputs.head_sha }}-${{ needs.context.outputs.base_sha }}
       cancel-in-progress: true
     runs-on: [self-hosted, Linux, ARM64, codex-security]
     timeout-minutes: 125
