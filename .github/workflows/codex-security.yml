@@ -189,7 +189,7 @@ jobs:
       contents: read
       pull-requests: write
     env:
-      CODEX_SECURITY_VERSION: "0.1.5"
+      CODEX_SECURITY_VERSION: "0.1.6"
 
     steps:
       - name: Check out trusted CI support

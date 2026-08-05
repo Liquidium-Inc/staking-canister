@@ -14,10 +14,8 @@ for knowledge_base in README.md AGENTS.md; do
   fi
 done
 
-# @openai/codex-security@0.1.5 cannot seal immutable diff targets
-# because it omits their required snapshot digest. Represent the
-# current base-to-merge tree delta as staged changes so the CLI binds
-# the scan to a deterministic working-tree digest.
+# Represent the current base-to-merge tree delta as staged changes so the CLI
+# binds the scan to a deterministic working-tree digest.
 git reset --soft "$BASE_SHA"
 log_pipe="$SCAN_LOG.pipe"
 mkfifo "$log_pipe"
