@@ -27,6 +27,7 @@ timeout --signal=TERM --kill-after=30s 110m \
   --working-tree \
   --base "$BASE_SHA" \
   --auth chatgpt \
+  --headless \
   --output-dir "$SCAN_DIR" \
   --json \
   --fail-on-severity high \
