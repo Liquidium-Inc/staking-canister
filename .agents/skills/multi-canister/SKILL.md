@@ -2,10 +2,10 @@
 name: multi-canister
 description: "Design and deploy multi-canister dapps. Covers inter-canister calls, canister factory pattern, async messaging pitfalls, bounded vs unbounded wait, and 2MB payload limits. Use when splitting an app across canisters, making inter-canister or cross-canister calls, or designing canister-to-canister communication. Do NOT use for single-canister apps."
 license: Apache-2.0
-compatibility: "icp-cli >= 0.1.0"
+compatibility: "icp-cli >= 0.2.2"
 metadata:
   title: Multi-Canister Architecture
-  category: Architecture
+  category: Core
 ---
 
 # Multi-Canister Architecture
@@ -16,7 +16,7 @@ Splitting an IC application across multiple canisters for scaling, separation of
 
 ## Prerequisites
 
-- For Motoko: `mops` package manager, `core = "2.0.0"` in mops.toml
+- For Motoko: `mops` package manager, `core = "2.1.0"` in mops.toml — `Runtime.envVar`, used below to discover a sibling canister's ID, was added in motoko-core 2.1.0
 - For Rust: `ic-cdk >= 0.19`, `candid`, `serde`, `ic-stable-structures`
 
 ## How It Works
@@ -83,7 +83,7 @@ Take the perspective of an experienced senior security engineer and carefully re
 
 ## Mistakes That Break Your Build
 
-1. **Deploying canisters in the wrong order.** Canisters with dependencies must be deployed according to their dependencies. Declare `dependencies` in icp.yaml so `icp deploy` orders them correctly.
+1. **Trying to order deployment with a `dependencies` field.** icp.yaml has a `dependencies` field but it is not used to order the deployment — icp-cli builds canisters in parallel, and `icp deploy` injects every canister's ID into every canister as a `PUBLIC_CANISTER_ID:<canister-name>` environment variable, so a canister can discover a sibling's ID at runtime regardless of deploy order. Read it with `Runtime.envVar<system>("PUBLIC_CANISTER_ID:user_service")` in Motoko (motoko-core >= 2.1.0) or `ic_cdk::api::env_var_value("PUBLIC_CANISTER_ID:user_service")` in Rust. See the `icp-cli` skill's Canister Environment Variables section.
 
 2. **Forgetting to generate type declarations for each backend canister.** Use language-specific tooling (e.g., `didc` for Candid bindings) to generate declarations for each backend canister individually.
 
@@ -114,14 +114,28 @@ my-project/
 canisters:
   - name: user_service
     recipe:
-      type: "@dfinity/motoko@v4.1.0"
-      configuration:
-        main: src/user_service/main.mo
+      type: "@dfinity/motoko@v5.0.0"
   - name: content_service
     recipe:
-      type: "@dfinity/motoko@v4.1.0"
-      configuration:
-        main: src/content_service/main.mo
+      type: "@dfinity/motoko@v5.0.0"
+```
+
+### mops.toml
+
+The `@dfinity/motoko@v5+` recipe compiles via `mops build <canister-name>`, so each canister's `main` lives in `mops.toml`, not in `recipe.configuration` in `icp.yaml`. Every canister `name` in `icp.yaml` must have an exactly matching `[canisters.<name>]` key here, or the build fails with `No Motoko canisters found in mops.toml configuration`.
+
+```toml
+[toolchain]
+moc = "1.9.0"
+
+[dependencies]
+core = "2.1.0"
+
+[canisters.user_service]
+main = "src/user_service/main.mo"
+
+[canisters.content_service]
+main = "src/content_service/main.mo"
 ```
 
 ### Motoko
@@ -347,17 +361,17 @@ members = [
 canisters:
   - name: user_service
     recipe:
-      type: "@dfinity/rust@v3.2.0"
+      type: "@dfinity/rust@v3.3.0"
       configuration:
-        package: user_service
         candid: src/user_service/user_service.did
   - name: content_service
     recipe:
-      type: "@dfinity/rust@v3.2.0"
+      type: "@dfinity/rust@v3.3.0"
       configuration:
-        package: content_service
         candid: src/content_service/content_service.did
 ```
+
+`package` is omitted: recipe >= v3.3.0 defaults it to the canister `name`, and each workspace member's `[package] name` already matches. Set `package` explicitly only when a crate name differs from its canister name.
 
 #### src/user_service/Cargo.toml
 
@@ -846,7 +860,7 @@ fn get_child_canister(owner: Principal) -> Option<Principal> {
 
 The factory examples above are intentionally kept simple to demonstrate the canister creation pattern. They lack several things that would be needed for production use:
 
-- **Cycle-drain protection.** Any non-anonymous principal can call `createChildCanister` repeatedly, each call consuming 1T cycles from the factory. Add an allowlist of authorized callers, enforce a per-user creation limit, and check the factory's cycle balance before creating a canister (e.g., `ExperimentalCycles.balance()` in Motoko, `ic_cdk::api::canister_balance128()` in Rust).
+- **Cycle-drain protection.** Any non-anonymous principal can call `createChildCanister` repeatedly, each call consuming 1T cycles from the factory. Add an allowlist of authorized callers, enforce a per-user creation limit, and check the factory's cycle balance before creating a canister (e.g., `Cycles.balance()` from `mo:core/Cycles` in Motoko, `ic_cdk::api::canister_cycle_balance()` in Rust).
 - **WASM module validation.** The WASM module is caller-supplied, meaning any authenticated user can deploy arbitrary code. Do not accept WASM from arbitrary callers in production. Instead, hardcode a known WASM module (or its hash) in the factory canister, or verify the module hash against an allowlist before installing. Whitelist principals that are allowed to deploy through the factory to avoid unauthorized use. 
 - **Reentrancy protection.** The factory performs two sequential awaits (`create_canister`, then `install_code`) with no locking. Concurrent calls from the same caller can create orphaned canisters that the factory loses track of. Add a lock (e.g., a `Set` of principals with in-flight calls) that prevents concurrent creation for the same caller.
 - **Partial failure handling.** If `create_canister` succeeds but `install_code` fails, the canister exists and has cycles but is untracked by the factory. Track the canister ID immediately after creation (before attempting `install_code`) so the factory can retry installation or clean up on failure.
@@ -874,7 +888,7 @@ The factory examples above are intentionally kept simple to demonstrate the cani
 icp deploy user_service
 
 # Rust content_service requires the user_service principal on every upgrade (post_upgrade arg)
-USER_SERVICE_ID=$(icp canister id user_service)
+USER_SERVICE_ID=$(icp canister status user_service --id-only)
 icp deploy content_service --argument "(principal \"$USER_SERVICE_ID\")"
 
 npm run build
@@ -893,7 +907,7 @@ icp network start -d
 icp deploy user_service
 
 # content_service (Rust) requires the user_service canister ID as an init argument
-USER_SERVICE_ID=$(icp canister id user_service)
+USER_SERVICE_ID=$(icp canister status user_service --id-only)
 icp deploy content_service --argument "(principal \"$USER_SERVICE_ID\")"
 
 # Build and deploy frontend
@@ -957,14 +971,19 @@ icp canister call user_service register '("testuser")'
 icp canister call content_service createPost '("Test Title", "Test Body")'
 # Expected: (variant { ok = record { ... } })
 
+# Remember the identity you registered with. There is no identity named
+# `default` -- `icp identity default` names the *role*, and a fresh icp-cli
+# install has only `anonymous`. (Notices go to stderr, so this captures cleanly.)
+ORIGINAL_IDENTITY=$(icp identity default)
+
 # Create a new identity that is NOT registered
 icp identity new unregistered --storage plaintext
-icp identity use unregistered
+icp identity default unregistered
 icp canister call content_service createPost '("Should Fail", "No user")'
 # Expected: (variant { err = "User not registered" })
 
 # Switch back
-icp identity use default
+icp identity default "$ORIGINAL_IDENTITY"
 ```
 
 ### Verify Cross-Canister Query

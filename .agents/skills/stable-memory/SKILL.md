@@ -2,20 +2,23 @@
 name: stable-memory
 description: "Persist canister state across upgrades. Covers StableBTreeMap and MemoryManager in Rust, persistent actor in Motoko, and upgrade hook patterns. Use when dealing with canister upgrades, data persistence, data lost after upgrade, stable storage, StableBTreeMap, pre_upgrade traps, or heap vs stable memory. Do NOT use for inter-canister calls or access control — use multi-canister or canister-security instead."
 license: Apache-2.0
-compatibility: "icp-cli >= 0.1.0"
+compatibility: "icp-cli >= 0.2.2, moc >= 1.7.0 for the Motoko examples (dot notation)"
 metadata:
   title: "Stable Memory & Upgrades"
-  category: Architecture
+  category: Core
 ---
 
 # Stable Memory & Canister Upgrades
 
 ## What This Is
-Stable memory is persistent storage on Internet Computer that survives canister upgrades. Heap memory (regular variables) is wiped on every upgrade. Any data you care about MUST be in stable memory, or it will be lost the next time the canister is deployed.
+Stable memory is persistent storage on Internet Computer that survives canister upgrades. Whether ordinary variables survive depends on the language:
+
+- **Rust** -- heap data (`thread_local! { RefCell<T> }`, plain `static`s) is wiped on every upgrade. Any data you care about must live in stable memory, either through `ic-stable-structures` or by serializing it yourself in `pre_upgrade`/`post_upgrade`.
+- **Motoko** -- enhanced orthogonal persistence is on by default, so `let` and `var` in a `persistent actor` already survive upgrades with no `stable` keyword and no upgrade hooks. Only `transient` declarations are wiped.
 
 ## Prerequisites
 
-- For Motoko: mops with `core = "2.0.0"` in mops.toml
+- For Motoko: mops with `core = "2.0.0"` in mops.toml, and `moc >= 1.7.0` (dot notation on `Map`/`List` needs it)
 - For Rust: `ic-stable-structures = "0.7"` in Cargo.toml
 
 ## Canister IDs
@@ -31,11 +34,38 @@ No external canister dependencies. Stable memory is a local canister feature.
 
 4. **Confusing heap memory limits with stable memory limits (Rust)** -- Heap (Wasm linear) memory is limited to 4GB for wasm32 and 6GB for wasm64. Stable memory can grow up to hundreds of GB (the subnet storage limit). The real danger: if you use `pre_upgrade`/`post_upgrade` hooks to serialize heap data to stable memory and deserialize it back, you are limited by the heap memory size AND by the instruction limit for upgrade hooks. Large datasets will trap during upgrade, bricking the canister. The solution is to use stable structures (`StableBTreeMap`, `StableCell`, etc.) that read/write directly to stable memory, bypassing the heap entirely. Use `MemoryManager` to partition stable memory into virtual memories so multiple structures can coexist without overwriting each other.
 
-5. **Changing record field types between upgrades (Motoko)** -- Altering the type of a persistent field (e.g., `Nat` to `Int`, or renaming a record field) will trap on upgrade and data is unrecoverable. Only ADD new optional fields. Never remove or rename existing ones.
+5. **Treating a rejected upgrade as data loss (Motoko)** -- Enhanced orthogonal persistence checks the new program against the existing state and either accepts the upgrade or rejects it *before* it takes effect. A rejected upgrade is **not** data loss: the canister keeps running the previous version with its state intact, so you fix the code and redeploy.
+
+   Which schema changes need a migration, and how to write one, are owned by `migrating-motoko-actors` (the mops-managed migration chain); load it for the rules and syntax. The one thing to know here is the common surprise: **changing a record type that an existing persistent variable holds is an incompatible change and needs a migration**, even for an *optional* added field, and regardless of where the record lives (a top-level `var`, a `Map` value, etc.). Whether adding a *new* stable field itself needs a migration depends on the project's setup — under the enhanced migration chain a stable field is declared type-only, so a new one needs a migration; a plain `persistent actor` with an initializer on the new field does not — which is exactly why the rules live in that skill rather than as a table here. An incompatible upgrade is rejected at runtime with `RTS error: Memory-incompatible program upgrade` (the old state stays intact — it is not data loss).
+
+   Don't discover this at deploy time. Configure `[canisters.<name>.check-stable]` in `mops.toml` so `mops check` runs the stable-compatibility check against the previous version's `.most` (load `mops-cli`): it tells you at check time whether a change is compatible or needs a migration, instead of surfacing the `RTS error` on the upgrade call.
 
 6. **Serializing large data in pre_upgrade (Rust)** -- `pre_upgrade` has a fixed instruction limit. If you serialize a large HashMap to stable memory in pre_upgrade, it will hit the limit and trap, bricking the canister. Use `StableBTreeMap` which writes directly to stable memory and needs no serialization step.
 
-7. **Using `actor { }` instead of `persistent actor { }` (Motoko)** -- Plain `actor` in mo:core requires explicit `stable` annotations and pre/post_upgrade hooks. `persistent actor` makes everything stable by default. Always use `persistent actor`.
+7. **Mismatching the actor form and the `--default-persistent-actors` flag (Motoko)** -- Both plain `actor` and `persistent actor` are correct; which one compiles depends on that compiler flag. Enabling it is the recommended setup, because it keeps the code less verbose:
+
+   ```toml
+   # mops.toml — recommended; see `mops-cli`
+   [moc]
+   args = ["--default-persistent-actors"]
+   ```
+
+   With the flag, every actor is persistent, so write plain `actor { }`; the `persistent` keyword still compiles but is redundant (warning M0217). Without the flag, `persistent actor { }` is required, and plain `actor` fails with `[M0220] this actor or actor class should be declared persistent`. No annotation rescues it — `stable`, `transient`, and `pre_upgrade`/`post_upgrade` hooks all still fail, because the error is on the actor itself:
+
+   ```motoko
+   // without --default-persistent-actors
+   actor {
+     stable var users = Map.empty<Nat, Text>();   // M0220 — `stable` does not help
+   };
+
+   persistent actor {
+     let users = Map.empty<Nat, Text>();          // compiles; persisted automatically
+   };
+   ```
+
+   The examples below use `persistent actor`, which compiles either way.
+
+   One trap when the flag is off: if the actor body has un-annotated `let`/`var`, moc reports `[M0219] this declaration is currently implicitly transient, please declare it explicitly transient` on those lines and M0220 never appears. Do not follow that suggestion — `transient` discards the data on upgrade, and the actor still fails M0220. The fix is `persistent` on the actor, or the flag.
 
 ## Implementation
 
@@ -46,13 +76,14 @@ With mo:core 2.0, `persistent actor` makes stable storage trivial. All `let` and
 ```motoko
 import Map "mo:core/Map";
 import List "mo:core/List";
-import Nat "mo:core/Nat";
+import Nat "mo:core/Nat";  // required: the compiler derives Map's implicit `compare` from this module
 import Text "mo:core/Text";
 import Time "mo:core/Time";
 
 persistent actor {
 
-  // Types -- must be inside actor body
+  // Types: in the actor body (as here) or in an imported module -- but never
+  // between the imports and the actor, which is M0141. See the `writing-motoko` skill.
   type User = {
     id : Nat;
     name : Text;
@@ -69,7 +100,7 @@ persistent actor {
 
   public func addUser(name : Text) : async Nat {
     let id = userCounter;
-    Map.add(users, Nat.compare, id, {
+    users.add(id, {
       id;
       name;
       created = Time.now();
@@ -80,11 +111,11 @@ persistent actor {
   };
 
   public query func getUser(id : Nat) : async ?User {
-    Map.get(users, Nat.compare, id)
+    users.get(id)
   };
 
   public query func getUserCount() : async Nat {
-    Map.size(users)
+    users.size()
   };
 
   // requestCount resets to 0 after every upgrade
@@ -110,6 +141,11 @@ version = "0.1.0"
 
 [dependencies]
 core = "2.0.0"
+
+# Required. Without a [toolchain] moc pin, mops falls back to the dfx cache and
+# the build dies with `dfx: not found` (see `mops-cli`).
+[toolchain]
+moc = "1.9.0"
 ```
 
 ### Rust

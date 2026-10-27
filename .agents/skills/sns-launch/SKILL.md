@@ -2,7 +2,7 @@
 name: sns-launch
 description: "Configure and launch an SNS DAO to decentralize a dapp. Covers token economics, governance parameters, testflight validation, NNS proposal submission, and decentralization swap. Use when launching an SNS, configuring tokenomics, or setting up DAO governance for a dapp. Do NOT use for NNS governance or general canister management."
 license: Apache-2.0
-compatibility: "icp-cli >= 0.1.0, dfx with sns extension"
+compatibility: "icp-cli >= 0.2.2, dfx with sns extension"
 metadata:
   title: SNS DAO Launch
   category: Governance
@@ -67,7 +67,13 @@ When an SNS launch succeeds, SNS-W deploys these canisters on an SNS subnet:
 This is the single source of truth for all launch parameters. Copy the template from the `dfinity/sns-testing` repo and customize:
 
 ```yaml
-# Note: numeric values are in e8s (1 token = 100_000_000 e8s). Time values are in seconds.
+# Units: token-valued fields (transaction_fee, rejection_fee, stake, treasury, the swap
+# *_icp limits) carry an explicit suffix -- "tokens", "token", or "e8s"
+# (1 token = 100_000_000 e8s). Duration fields (initial_voting_period, dissolve_delay,
+# vesting_period, ...) carry a time suffix and may be concatenated: seconds, minutes,
+# hours, days, weeks, months (30.44 days), years (365.25 days) -- e.g. "4 days", "1w 2d 3h".
+# Plain counts such as minimum_participants take no suffix.
+# An e8s-only, seconds-only config is the older format; do not mix the two conventions.
 
 # === PROJECT METADATA ===
 name: MyProject
@@ -369,10 +375,10 @@ dfx sns propose --network ic --neuron $NEURON_ID sns_init.yaml
 
 ```bash
 # List deployed SNS canisters
-icp canister id sns_governance
-icp canister id sns_ledger
-icp canister id sns_root
-icp canister id sns_swap
+icp canister status sns_governance --id-only
+icp canister status sns_ledger --id-only
+icp canister status sns_root --id-only
+icp canister status sns_swap --id-only
 
 # Verify SNS governance is operational
 icp canister call sns_governance get_nervous_system_parameters '()'

@@ -2,7 +2,7 @@
 name: cycles-management
 description: "Manage cycles and canister lifecycle. Covers cycle balance checks, top-ups, freezing thresholds, canister creation, and ICP-to-cycles conversion via the CMC. Use when working with cycles, canister funding, freezing threshold, frozen canister, out of cycles, top-up, canister creation, or cycle balance. Do NOT use for wallet-to-dApp integration or ICRC signer flows — use wallet-integration instead."
 license: Apache-2.0
-compatibility: "icp-cli >= 0.1.0"
+compatibility: "icp-cli >= 0.2.2"
 metadata:
   title: Cycles Management
   category: Infrastructure
@@ -11,7 +11,7 @@ metadata:
 # Cycles & Canister Management
 
 ## What This Is
-Cycles are the computation fuel for canisters on Internet Computer. Every canister operation (execution, storage, messaging) burns cycles. When a canister runs out of cycles, it freezes and eventually gets deleted. 1 trillion cycles (1T) costs approximately 1 USD equivalent in ICP (the exact rate is set by the NNS and fluctuates with ICP price via the CMC).
+Cycles are the computation fuel for canisters on Internet Computer. Every canister operation (execution, storage, messaging) burns cycles. When a canister runs out of cycles, it freezes and is eventually uninstalled -- its code and data are deleted, but its metadata (canister ID, controllers, settings) survives. 1 trillion cycles (1T) costs approximately 1 USD equivalent in ICP (the exact rate is set by the NNS and fluctuates with ICP price via the CMC).
 
 **Note:** icp-cli uses the **cycles ledger** (`um5iw-rqaaa-aaaaq-qaaba-cai`) by default. The cycles ledger is a single canister that tracks cycle balances for all principals, similar to a token ledger. Commands like `icp cycles balance`, `icp cycles mint`, and `icp canister top-up` go through the cycles ledger. There is no legacy wallet concept in icp-cli. The programmatic patterns below (accepting cycles, creating canisters via management canister) remain the same regardless of which funding mechanism is used.
 
@@ -32,7 +32,7 @@ The Management Canister (`aaaaa-aa`) is a virtual canister -- it does not exist 
 
 ## Mistakes That Break Your Build
 
-1. **Running out of cycles silently freezes the canister** -- There is no warning. The canister stops responding to all calls. If cycles are not topped up before the freezing threshold, the canister and all its data will be permanently deleted. Set a freezing threshold and monitor balances.
+1. **Running out of cycles silently freezes the canister** -- There is no warning. A frozen canister stops executing messages but keeps paying rent for its memory and allocations, so the balance continues to drain. When it reaches zero the canister is uninstalled: code and data are gone permanently, and only the metadata (canister ID, controllers, settings) remains. Set a freezing threshold and monitor balances.
 
 2. **Not setting freezing_threshold** -- Default is 30 days. If your canister burns cycles fast (high traffic, large stable memory), 30 days may not be enough warning. Set it higher for production canisters. The freezing threshold defines how many seconds worth of idle cycles the canister must retain before it freezes.
 
@@ -40,9 +40,21 @@ The Management Canister (`aaaaa-aa`) is a virtual canister -- it does not exist 
 
 4. **Sending cycles to the wrong canister** -- Cycles sent to a canister cannot be retrieved. There is no refund mechanism for cycles transferred to the wrong principal. Double-check the canister ID before topping up.
 
-5. **Forgetting to set the canister controller** -- If you lose the controller identity, you permanently lose the ability to upgrade, top up, or manage the canister. Always add a backup controller. Use `icp canister update-settings --add-controller PRINCIPAL` to add one.
+5. **Forgetting to set the canister controller** -- If you lose the controller identity, you permanently lose the ability to upgrade, top up, or manage the canister. Always add a backup controller. Use `icp canister settings update --add-controller PRINCIPAL` to add one.
 
 6. **Using ExperimentalCycles in mo:core** -- In mo:core 2.0, the module is renamed to `Cycles`. `import ExperimentalCycles "mo:base/ExperimentalCycles"` will fail. Use `import Cycles "mo:core/Cycles"`.
+
+7. **Using `icp cycles transfer` to fund a canister** -- `icp cycles transfer <amount> <principal>` moves cycles between cycles-ledger balances, the same as a token transfer between accounts. Passing a canister's principal as the recipient credits that principal's cycles-ledger balance, not the canister's actual execution/compute cycle balance -- `icp canister status` will not show the cycles as received, and the canister keeps burning down its real balance toward freezing with no indication anything went wrong. Use `icp canister top-up <canister> --amount <N> -e ic` instead, which deposits cycles directly onto the canister via the management canister. See "Top Up a Canister" below for both commands side by side.
+
+8. **Using `-n ic` on a command that names a canister** -- `-n`/`--network` and `-e`/`--environment` are different selectors and conflict with each other; passing both is an error. A canister **name** can only be resolved through an environment, so `-n` fails on it:
+
+   ```bash
+   icp canister status backend -n ic
+   # Error: Specifying a network is not supported if you are targeting a canister
+   # by name, specify an environment instead
+   ```
+
+   So `-e ic` for anything naming a canister (`top-up`, `status`, `settings update`, `create`), and `-n ic` for commands that take a principal or no canister at all (`cycles mint`, `cycles balance`, `cycles transfer`). This is why the mainnet examples below mix the two flags. Load `icp-cli` for the full flag rules.
 
 ## Implementation
 
@@ -259,9 +271,22 @@ icp canister top-up backend --amount 1000000000000
 icp canister top-up backend --amount 1000000000000 -e ic
 
 # Convert ICP to cycles and top up in one step (mainnet)
-icp cycles mint --icp 1.0 -e ic
+icp cycles mint --icp 1.0 -n ic   # no canister argument, so -n is fine (see Pitfall 8)
+
+# No ICP to convert? Buy cycles with a card for the identity instead (load the `buy-cycles` skill)
+icp cycles buy --amount 10 -n ic
 icp canister top-up backend --amount 1000000000000 -e ic
 ```
+
+```bash
+# CORRECT -- funds the canister's execution balance:
+icp canister top-up backend --amount 600b -e ic
+
+# WRONG -- sends to the recipient's cycles-ledger balance, canister cannot use it:
+icp cycles transfer 600000000000 <canister-principal> -n ic
+```
+
+`--amount` on `icp canister top-up` accepts `k`/`m`/`b`/`t` suffixes (thousand/million/billion/trillion).
 
 ### Create a Canister via icp
 
@@ -273,17 +298,19 @@ icp canister create my_canister
 icp canister create my_canister -e ic --cycles 2000000000000
 
 # Add a backup controller
-icp canister update-settings my_canister --add-controller BACKUP_PRINCIPAL_HERE
+icp canister settings update my_canister --add-controller BACKUP_PRINCIPAL_HERE
 ```
+
+Each creation takes `--cycles` (default 2T) plus the cycles ledger's 100M fee out of the identity's balance. Before `icp deploy -e ic` creates several canisters at once, estimate `N × (2T + 100M)`, compare with `icp cycles balance -n ic`, and close any gap before deploying -- `icp cycles mint --cycles <gap> -n ic` with ICP, `icp cycles buy --cycles <gap> -n ic` with a card. The `icp-cli` skill's "Funding an identity for mainnet" section has the steps.
 
 ### Set Freezing Threshold
 
 ```bash
 # Set freezing threshold to 90 days (in seconds: 90 * 24 * 60 * 60 = 7776000)
-icp canister update-settings backend --freezing-threshold 7776000
+icp canister settings update backend --freezing-threshold 7776000
 
 # Mainnet
-icp canister update-settings backend --freezing-threshold 7776000 -e ic
+icp canister settings update backend --freezing-threshold 7776000 -e ic
 ```
 
 ## Verify It Works
