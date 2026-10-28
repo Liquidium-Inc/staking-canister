@@ -5,3 +5,10 @@
 /bin
 /test
 /src/libs/ordinals_runes/target
+
+# cargo install --root ./ bookkeeping
+.crates2.json
+.crates.toml
+
+# dfx mainnet canister ids
+canister_ids.json
