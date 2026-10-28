@@ -28,7 +28,7 @@ num-traits = "0.2.19"
 ic-stable-structures = "0.6.9"
 ic-canister-log = "0.2.0"
 
-miniscript = { version = "9.2", features = ["compiler"] }
+miniscript = { version = "12.3", features = ["compiler"] }
 bitcoin = { version = "0.30" }                                                  # <— bajar a 0.30
 secp256k1 = { version = "0.27", default-features = false, features = ["rand"] }
 getrandom = { version = "=0.2.15", features = ["custom"] }
@@ -42,6 +42,6 @@ async-trait = "0.1.88"
 mockall = "0.13.1"
 
 [dev-dependencies]
-rand = "0.9.3"
+rand = "0.10.3"
 tokio = { version = "1.46.1", features = ["full"] }
 ordinals = "0.0.12"
