@@ -1,0 +1,372 @@
+name: Codex Security
+
+on:
+  push:
+    branches: [main]
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, edited, closed]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        required: true
+      head_sha:
+        required: true
+      base_ref:
+        required: true
+      base_sha:
+        required: true
+
+env:
+  # Every script is loaded from the trusted base revision, never from the PR head.
+  TRUSTED_CI: ${{ github.workspace }}/trusted-ci
+
+jobs:
+  refresh:
+    name: Refresh open PR scans
+    if: github.event_name == 'push'
+    concurrency:
+      group: codex-security-refresh-${{ github.repository }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      checks: write
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Check out trusted CI support
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          path: trusted-ci
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Dispatch scans for eligible open PRs
+        env:
+          BASE_REF: ${{ github.ref_name }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bash "$TRUSTED_CI/.github/scripts/codex-security-ci/refresh-open-prs.sh"
+
+  cancel-closed:
+    name: Cancel closed PR scan
+    if: >-
+      github.event_name == 'pull_request_target' &&
+      github.event.action == 'closed' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    concurrency:
+      group: codex-security-pr-${{ github.repository }}-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}-${{ github.event.pull_request.base.sha }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Check out trusted CI support
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          path: trusted-ci
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Publish closed policy check
+        env:
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash "$TRUSTED_CI/.github/scripts/codex-security-ci/publish-closed-policy.sh"
+
+  context:
+    name: Validate PR context
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request_target' &&
+        github.event.action != 'closed' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        github.event.pull_request.user.login != 'dependabot[bot]' &&
+        (github.event.action != 'edited' || github.event.changes.base != null))
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+      contents: read
+      pull-requests: read
+    outputs:
+      base_ref: ${{ steps.context.outputs.base_ref }}
+      base_sha: ${{ steps.context.outputs.base_sha }}
+      current: ${{ steps.context.outputs.current }}
+      head_sha: ${{ steps.context.outputs.head_sha }}
+      policy_check_id: ${{ steps.context.outputs.policy_check_id }}
+      pr_number: ${{ steps.context.outputs.pr_number }}
+    steps:
+      - name: Check out trusted CI support
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          path: trusted-ci
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Validate current PR and mark policy pending
+        id: context
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref || inputs.base_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || inputs.base_sha }}
+          EVENT_ACTION: ${{ github.event.action || 'base_refresh' }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || inputs.head_sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash "$TRUSTED_CI/.github/scripts/codex-security-ci/validate-context.sh"
+
+  excluded:
+    name: Block unsupported fork PR
+    if: >-
+      github.event_name == 'pull_request_target' &&
+      github.event.action != 'closed' &&
+      github.event.pull_request.head.repo.full_name != github.repository &&
+      github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+      contents: read
+    steps:
+      - name: Check out trusted CI support
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          path: trusted-ci
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Publish terminal policy status
+        env:
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash "$TRUSTED_CI/.github/scripts/codex-security-ci/publish-fork-policy.sh"
+
+  dependabot:
+    name: Record Dependabot policy exclusion
+    if: >-
+      github.event_name == 'pull_request_target' &&
+      github.event.action != 'closed' &&
+      github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+      contents: read
+    steps:
+      - name: Check out trusted CI support
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          path: trusted-ci
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Publish neutral policy check
+        env:
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash "$TRUSTED_CI/.github/scripts/codex-security-ci/publish-dependabot-policy.sh"
+
+  scan:
+    name: PR security scan
+    needs: context
+    if: needs.context.outputs.current == 'true'
+    concurrency:
+      group: codex-security-pr-${{ github.repository }}-${{ needs.context.outputs.pr_number }}-${{ needs.context.outputs.head_sha }}-${{ needs.context.outputs.base_sha }}
+      cancel-in-progress: true
+    runs-on: [self-hosted, Linux, ARM64, codex-security]
+    timeout-minutes: 125
+    permissions:
+      checks: write
+      contents: read
+      pull-requests: write
+    env:
+      CODEX_SECURITY_VERSION: "0.1.6"
+
+    steps:
+      - name: Check out trusted CI support
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.context.outputs.base_sha }}
+          path: trusted-ci
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Revalidate current PR inside scan lock
+        id: scan-context
+        env:
+          BASE_REF: ${{ needs.context.outputs.base_ref }}
+          BASE_SHA: ${{ needs.context.outputs.base_sha }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.context.outputs.head_sha }}
+          PR_NUMBER: ${{ needs.context.outputs.pr_number }}
+        run: bash "$TRUSTED_CI/.github/scripts/codex-security-ci/revalidate-scan-context.sh"
+
+      - name: Preserve the trusted reporter
+        if: steps.scan-context.outputs.current == 'true'
+        run: |
+          set -euo pipefail
+          test -f "$TRUSTED_CI/.github/scripts/codex-security-report/main.mjs"
+          install -d -m 0700 "$RUNNER_TEMP/codex-security-report"
+          cp -R "$TRUSTED_CI/.github/scripts/codex-security-report/." \
+            "$RUNNER_TEMP/codex-security-report/"
+          chmod -R go-rwx "$RUNNER_TEMP/codex-security-report"
+
+      - name: Set up Node.js
+        if: steps.scan-context.outputs.current == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "26"
+
+      - name: Set up Python
+        if: steps.scan-context.outputs.current == 'true'
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.14"
+
+      - name: Install Codex Security
+        if: steps.scan-context.outputs.current == 'true'
+        run: |
+          set -euo pipefail
+          npm install \
+            --prefix "$RUNNER_TEMP/codex-security" \
+            --ignore-scripts \
+            --no-audit \
+            --no-fund \
+            "@openai/codex-security@$CODEX_SECURITY_VERSION"
+
+      - name: Verify Codex Security
+        if: steps.scan-context.outputs.current == 'true'
+        env:
+          CODEX_SECURITY_BIN: ${{ runner.temp }}/codex-security/node_modules/.bin/codex-security
+        run: |
+          set -euo pipefail
+          test -x "$CODEX_SECURITY_BIN"
+          "$CODEX_SECURITY_BIN" --version
+
+      - name: Check out the pull request
+        if: steps.scan-context.outputs.current == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: refs/pull/${{ needs.context.outputs.pr_number }}/merge
+          path: pull-request
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Scan the pull request
+        id: codex-security
+        if: steps.scan-context.outputs.current == 'true'
+        env:
+          BASE_SHA: ${{ needs.context.outputs.base_sha }}
+          CODEX_HOME: /var/lib/codex-security-runner/codex-home
+          CODEX_SECURITY_BIN: ${{ runner.temp }}/codex-security/node_modules/.bin/codex-security
+          HEAD_SHA: ${{ needs.context.outputs.head_sha }}
+          SCAN_DIR: ${{ runner.temp }}/codex-security-results-${{ github.run_id }}-${{ github.run_attempt }}
+          SCAN_JSON: ${{ runner.temp }}/codex-security-${{ github.run_id }}-${{ github.run_attempt }}.json
+          SCAN_LOG: ${{ runner.temp }}/codex-security-${{ github.run_id }}-${{ github.run_attempt }}.log
+        working-directory: pull-request
+        run: bash "$TRUSTED_CI/.github/scripts/codex-security-ci/run-scan.sh"
+
+      - name: Preserve scan results
+        id: artifact
+        if: always() && !cancelled() && steps.scan-context.outputs.current == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: codex-security-results-${{ github.run_attempt }}
+          path: |
+            ${{ steps.codex-security.outputs.scan_dir }}
+            ${{ steps.codex-security.outputs.scan_json }}
+            ${{ steps.codex-security.outputs.scan_log }}
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Report findings on the pull request
+        id: report
+        if: always() && !cancelled() && steps.scan-context.outputs.current == 'true'
+        env:
+          ARTIFACT_OUTCOME: ${{ steps.artifact.outcome }}
+          BASE_REF: ${{ needs.context.outputs.base_ref }}
+          BASE_SHA: ${{ needs.context.outputs.base_sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.context.outputs.head_sha }}
+          MERGE_REPO: ${{ github.workspace }}/pull-request
+          MERGE_SHA: ${{ steps.codex-security.outputs.merge_sha }}
+          PR_NUMBER: ${{ needs.context.outputs.pr_number }}
+          SCAN_DIR: ${{ steps.codex-security.outputs.scan_dir || format('{0}/codex-security-results-{1}-{2}', runner.temp, github.run_id, github.run_attempt) }}
+          SCAN_EXIT_CODE: ${{ steps.codex-security.outputs.exit_code || '2' }}
+          SCAN_OUTCOME: ${{ steps.codex-security.outcome }}
+        run: node "$RUNNER_TEMP/codex-security-report/main.mjs"
+
+      - name: Enforce security policy
+        if: always() && !cancelled() && steps.scan-context.outputs.current == 'true'
+        env:
+          ARTIFACT_OUTCOME: ${{ steps.artifact.outcome }}
+          POLICY_STATE: ${{ steps.report.outputs.policy_state }}
+          REPORT_OUTCOME: ${{ steps.report.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SCAN_EXIT_CODE: ${{ steps.codex-security.outputs.exit_code || '2' }}
+          SCAN_OUTCOME: ${{ steps.codex-security.outcome }}
+        run: bash "$TRUSTED_CI/.github/scripts/codex-security-ci/enforce-policy.sh"
+
+      - name: Finalize policy status
+        if: always() && !cancelled()
+        env:
+          ARTIFACT_OUTCOME: ${{ steps.artifact.outcome }}
+          BASE_REF: ${{ needs.context.outputs.base_ref }}
+          BASE_SHA: ${{ needs.context.outputs.base_sha }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.context.outputs.head_sha }}
+          POLICY_DESCRIPTION: ${{ steps.report.outputs.policy_description }}
+          POLICY_STATE: ${{ steps.report.outputs.policy_state }}
+          POLICY_CHECK_ID: ${{ needs.context.outputs.policy_check_id }}
+          PR_NUMBER: ${{ needs.context.outputs.pr_number }}
+          REPORT_OUTCOME: ${{ steps.report.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SCAN_CONTEXT_OUTCOME: ${{ steps.scan-context.outcome }}
+          SCAN_CURRENT: ${{ steps.scan-context.outputs.current }}
+        run: bash "$TRUSTED_CI/.github/scripts/codex-security-ci/finalize-policy.sh"
+
+  finalize-unfinished:
+    name: Finalize unfinished policy check
+    needs: [context, scan]
+    if: >-
+      always() &&
+      (needs.context.result == 'cancelled' ||
+        needs.context.result == 'failure' ||
+        (needs.context.outputs.policy_check_id != '' &&
+          (needs.scan.result == 'cancelled' ||
+            needs.scan.result == 'failure' ||
+            needs.scan.result == 'skipped')))
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+      contents: read
+    steps:
+      - name: Check out trusted CI support
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          path: trusted-ci
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Close this run's unfinished policy check
+        env:
+          CONTEXT_RESULT: ${{ needs.context.result }}
+          EXTERNAL_ID: ${{ github.run_id }}:${{ github.run_attempt }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.context.outputs.head_sha || github.event.pull_request.head.sha || inputs.head_sha }}
+          POLICY_CHECK_ID: ${{ needs.context.outputs.policy_check_id }}
+          SCAN_RESULT: ${{ needs.scan.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash "$TRUSTED_CI/.github/scripts/codex-security-ci/finalize-unfinished.sh"
