@@ -1,3 +1,5 @@
+> **This repository is archived and out of date.** Liquidium's staking code now lives in private repositories for security reasons. The code here does not match what runs in production, so please don't send security reports or audits based on it. If you find an issue in the live product, email security@liquidium.org.
+
 # Liquidium Staking Protocol
 
 A Bitcoin staking protocol that allows users to stake Bitcoin and receive liquid staking tokens.
