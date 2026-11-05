@@ -5,7 +5,6 @@ We take the security of the Liquidium staking canister seriously and appreciate 
 ## Reporting a Vulnerability
 
 - **Email**: Send details to `security@liquidium.org`.
-- **GitHub Security Advisory**: Use the repository's private advisory workflow under **Security ➝ Advisories ➝ Report a vulnerability**.
 
 Please include:
 
@@ -24,7 +23,7 @@ If you need to encrypt sensitive information, request our PGP key via the initia
 
 ## Scope
 
-This policy applies to code and artifacts maintained in this repository, including the Motoko/Rust canister implementation, tooling, and deployment scripts. Production infrastructure incidents should also be reported through the same channels.
+This repository is archived and out of date, so its code is out of scope. Please report issues in the live Liquidium staking product by email to `security@liquidium.org`.
 
 ## Safe Harbor
 
